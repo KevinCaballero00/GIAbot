@@ -21,7 +21,8 @@
 <div id="chat-box">
     <div id="header">🤖 GIAbot</div>
     <div id="messages">
-        <div class="msg bot">¡Hola! Soy GIAbot 👋 ¿En qué puedo ayudarte sobre el semillero GIA?</div>
+        <div class="msg bot">¡Hola! Soy GIAbot 👋 </div>
+        <div [innerHTML]="message"></div>
     </div>
     <div id="input-area">
         <input id="user-input" type="text" placeholder="Escribe tu pregunta..."
