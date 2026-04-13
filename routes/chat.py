@@ -10,21 +10,17 @@ router = APIRouter()
 async def chat(data: Message):
     mensaje = data.message.lower()
     
-    # Detectar intención de generar PDF
     if "pdf" in mensaje:
-        info = {
-            "Nombre": "Usuario GIA",
-            "Solicitud": "Generación de documento",
-            "Grupo": "GIA UFPS"
-        }
+        # Pasa tanto el mensaje como el historial
+        info = extraer_informacion_para_pdf(data.message, data.history)
         archivo = generar_pdf(info)
         return {
             "reply": f"📄 Tu PDF ha sido generado correctamente.\nPuedes descargarlo aquí: http://localhost:8000/download/{archivo}"
         }
     
-    # Si no es PDF, usar la IA normalmente
     reply = generar_respuesta(data.message, data.history)
     return {"reply": reply}
+
 
 @router.get("/download/{filename}")
 def download_file(filename: str):

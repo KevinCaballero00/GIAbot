@@ -18,5 +18,4 @@ def generar_pdf(data: dict, filename="documento.pdf"):
         content.append(Spacer(1, 10))
 
     doc.build(content)
-
     return filename
