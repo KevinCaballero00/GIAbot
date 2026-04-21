@@ -25,3 +25,4 @@ async def chat(data: Message):
 @router.get("/download/{filename}")
 def download_file(filename: str):
     return FileResponse(path=filename, filename=filename)
+
