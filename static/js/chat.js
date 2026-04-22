@@ -8,6 +8,9 @@ const messages = document.getElementById('chat-messages');
 let history = [];
 let isOpen = false;
 
+// ID único por sesión de navegador
+const SESSION_ID = crypto.randomUUID();
+
 toggle.addEventListener('click', () => {
   isOpen = !isOpen;
   chatWindow.classList.toggle('open', isOpen);
@@ -63,7 +66,7 @@ async function sendMessage() {
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, history })
+      body: JSON.stringify({ message: text, history, session_id: SESSION_ID })
     });
     const data = await res.json();
     hideTyping();
