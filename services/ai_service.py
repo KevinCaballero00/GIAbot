@@ -17,6 +17,17 @@ INFORMACIÓN ACTUALIZADA DE LA PÁGINA WEB DEL GIA
 La siguiente información fue extraída directamente del sitio web oficial del grupo GIA.
 Úsala para responder preguntas sobre investigadores, semilleros, proyectos y servicios.
 
+Notas sobre el formato:
+- Los enlaces académicos aparecen en línea como [texto — Tipo: URL]
+  (por ejemplo, [Ver perfil — Google Scholar: https://scholar.google.com/...]).
+- Hay un bloque titulado "Directorio estructurado de docentes / investigadores
+  del GIA" que agrupa, por persona, todos sus perfiles verificados
+  (Google Scholar, ORCID, ResearchGate, CvLAC, etc.). Cuando un usuario
+  pregunte por un investigador específico, cita esos enlaces directamente y
+  preséntalos como una lista breve en vez de inventar URLs.
+- Si un enlace no aparece en el contexto, dilo explícitamente en lugar de
+  fabricarlo.
+
 {CONTEXTO_WEB}
 """
 
