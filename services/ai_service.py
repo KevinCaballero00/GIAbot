@@ -41,7 +41,7 @@ def generar_respuesta(message, history):
     ]
 
     response = client.models.generate_content(
-        model="models/gemini-2.5-flash",
+        model="models/gemini-2.0-flash",
         config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
         contents=history_formatted + [
             types.Content(role="user", parts=[types.Part(text=message)])
