@@ -1,20 +1,17 @@
 """
 Scraper del sitio web del GIA.
 
-Mejoras frente a la versión inicial:
+Funcionalidades:
   * Conserva los enlaces académicos (Google Scholar, ORCID, ResearchGate,
-    CvLAC, LinkedIn, GitHub, Scopus, Publons) en línea con el texto, en vez
-    de descartarlos con `get_text()`.
-  * Para la página `/team/` produce además un bloque estructurado con los
-    docentes y todos sus perfiles académicos agrupados por persona.
-  * Añade caché en disco con TTL de 24 h para que los reinicios del servidor
-    no requieran siempre 7 peticiones HTTP (y permitan trabajar offline si
-    ya hubo una corrida exitosa).
-  * Headers, timeouts y manejo de errores explícito por página, sin tumbar
-    la importación si el sitio está caído.
+    CvLAC, LinkedIn, GitHub, Scopus, Publons) en línea con el texto.
+  * Para la página /team/ produce un bloque estructurado con los docentes,
+    sus perfiles académicos y el contenido extraído de cada perfil:
+    títulos académicos, publicaciones, líneas de investigación.
+  * Enriquecimiento de perfiles en paralelo (ThreadPoolExecutor) para no
+    bloquear el arranque.
+  * Caché en disco con TTL de 24 h.
 
-Mantiene la API pública previa: `CONTEXTO_WEB` queda disponible al importar.
-También expone `refrescar_contexto_web()` para forzar una recarga.
+API pública: CONTEXTO_WEB, obtener_contexto_web(), refrescar_contexto_web()
 """
 
 from __future__ import annotations
@@ -23,6 +20,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -44,8 +42,9 @@ URLS = [
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (compatible; GIAbot-Scraper/1.1; "
-        "+https://gia.ufps.edu.co)"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
     )
 }
 
@@ -53,24 +52,27 @@ CACHE_DIR = Path(__file__).resolve().parent.parent / "cache"
 CACHE_FILE = CACHE_DIR / "contexto_web.json"
 CACHE_TTL_SECONDS = 60 * 60 * 24  # 24 h
 
-# Mapa host -> etiqueta legible para clasificar enlaces académicos.
+# Límites para el contenido de perfiles académicos
+MAX_CHARS_PERFIL = 2500
+MAX_PUBLICACIONES = 25
+
 ACADEMIC_HOSTS: dict[str, str] = {
-    "scholar.google":       "Google Scholar",
-    "scienti.minciencias":  "CvLAC (Minciencias)",
-    "researchgate.net":     "ResearchGate",
-    "orcid.org":            "ORCID",
-    "linkedin.com":         "LinkedIn",
-    "github.com":           "GitHub",
-    "academia.edu":         "Academia.edu",
-    "publons.com":          "Publons",
-    "scopus.com":           "Scopus",
+    "scholar.google":      "Google Scholar",
+    "scienti.minciencias": "CvLAC (Minciencias)",
+    "scienti.gov.co":      "CvLAC (Minciencias)",
+    "researchgate.net":    "ResearchGate",
+    "orcid.org":           "ORCID",
+    "linkedin.com":        "LinkedIn",
+    "github.com":          "GitHub",
+    "academia.edu":        "Academia.edu",
+    "publons.com":         "Publons",
+    "scopus.com":          "Scopus",
 }
 
 
 # ───────────────────────────── utilidades ─────────────────────────────────────
 
 def _clasificar_enlace(url: str) -> str | None:
-    """Devuelve la etiqueta del perfil académico, o None si no es académico."""
     u = (url or "").lower().strip()
     if not u:
         return None
@@ -108,11 +110,6 @@ def _limpiar_dom(soup: BeautifulSoup) -> BeautifulSoup:
 
 
 def _inline_links(soup: BeautifulSoup) -> None:
-    """Reemplaza cada <a href> por su texto.
-
-    Para enlaces académicos / de contacto conserva la URL en línea, para que
-    el modelo pueda citarlos. Para enlaces normales sólo deja el texto.
-    """
     for a in list(soup.find_all("a", href=True)):
         href = a["href"].strip()
         text = a.get_text(" ", strip=True)
@@ -129,6 +126,296 @@ def _inline_links(soup: BeautifulSoup) -> None:
             a.replace_with(text or "")
 
 
+# ───────────────── extractores de perfiles académicos ─────────────────────────
+
+def _extracto_cvlac(url: str) -> str | None:
+    """Extrae formación académica y publicaciones de un perfil CvLAC."""
+    html = _fetch(url, timeout=20)
+    if not html:
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+    _limpiar_dom(soup)
+
+    texto_completo = soup.get_text("\n", strip=True)
+    texto_completo = re.sub(r"\n{3,}", "\n\n", texto_completo)
+    lineas = texto_completo.split("\n")
+
+    # Palabras clave para identificar secciones de interés
+    kw_formacion = {
+        "formación académica", "formacion academica",
+        "estudios de doctorado", "estudios de maestría",
+        "estudios de pregrado", "título obtenido",
+        "formación complementaria",
+    }
+    kw_publicaciones = {
+        "artículos publicados", "articulos publicados",
+        "producción bibliográfica", "produccion bibliografica",
+        "artículos de investigación", "libros publicados",
+        "capítulos de libro", "revistas especializadas",
+    }
+
+    secciones: list[str] = []
+    capturando = False
+    buf: list[str] = []
+    lineas_max = 60
+
+    for linea in lineas:
+        ll = linea.lower().strip()
+        es_seccion_interes = any(kw in ll for kw in kw_formacion | kw_publicaciones)
+
+        if es_seccion_interes:
+            if buf:
+                secciones.append("\n".join(buf))
+            buf = [linea]
+            capturando = True
+        elif capturando:
+            buf.append(linea)
+            if len(buf) >= lineas_max:
+                secciones.append("\n".join(buf))
+                buf = []
+                capturando = False
+
+    if buf:
+        secciones.append("\n".join(buf))
+
+    if not secciones:
+        # Fallback: primera parte del texto plano
+        return texto_completo[:MAX_CHARS_PERFIL]
+
+    resultado = "\n\n---\n\n".join(secciones)
+    return resultado[:MAX_CHARS_PERFIL]
+
+
+def _extracto_google_scholar(url: str) -> str | None:
+    """Extrae publicaciones y estadísticas de un perfil Google Scholar."""
+    # Asegurar que la URL carga todos los artículos visibles
+    if "pagesize" not in url:
+        url = url.rstrip("/") + ("&" if "?" in url else "?") + "sortby=pubdate&pagesize=100"
+
+    html = _fetch(url, timeout=20)
+    if not html:
+        return None
+
+    # Google bloquea con CAPTCHA — detectarlo antes de parsear
+    if (
+        "captcha" in html.lower()
+        or "unusual traffic" in html.lower()
+        or len(html) < 800
+    ):
+        logger.warning("Scraper: Google Scholar bloqueó la solicitud para %s", url)
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+    lineas: list[str] = []
+
+    # Estadísticas del autor (citas, h-index, i10)
+    stats: list[str] = []
+    for fila in soup.select("#gsc_rsb_st tbody tr"):
+        celdas = fila.find_all("td")
+        if len(celdas) >= 2:
+            nombre = celdas[0].get_text(strip=True)
+            valor = celdas[1].get_text(strip=True)
+            if nombre and valor:
+                stats.append(f"{nombre}: {valor}")
+    if stats:
+        lineas.append("Estadísticas: " + " | ".join(stats))
+
+    # Lista de publicaciones
+    publicaciones: list[str] = []
+    for fila in soup.select("#gsc_a_b .gsc_a_tr"):
+        titulo_el = fila.select_one(".gsc_a_at")
+        venue_el = fila.select_one(".gsc_a_e")
+        year_el = fila.select_one(".gsc_a_y span")
+        citas_el = fila.select_one(".gsc_a_ac")
+
+        if not titulo_el:
+            continue
+
+        partes = [titulo_el.get_text(strip=True)]
+        venue = venue_el.get_text(strip=True) if venue_el else ""
+        if venue:
+            partes.append(venue)
+        year = year_el.get_text(strip=True) if year_el else ""
+        if year:
+            partes.append(f"({year})")
+        citas = citas_el.get_text(strip=True) if citas_el else ""
+        if citas and citas not in ("", "0"):
+            partes.append(f"[citas: {citas}]")
+
+        publicaciones.append(" — ".join(partes))
+
+    if not publicaciones:
+        return None
+
+    lineas.append(f"Publicaciones ({len(publicaciones)} encontradas):")
+    for p in publicaciones[:MAX_PUBLICACIONES]:
+        lineas.append(f"  • {p}")
+
+    resultado = "\n".join(lineas)
+    return resultado[:MAX_CHARS_PERFIL]
+
+
+def _extracto_orcid(url: str) -> str | None:
+    """Extrae formación y publicaciones usando el API público de ORCID."""
+    match = re.search(r"(\d{4}-\d{4}-\d{4}-\d{3}[\dX])", url)
+    if not match:
+        return None
+
+    orcid_id = match.group(1)
+    api_base = f"https://pub.orcid.org/v3.0/{orcid_id}"
+    headers_json = {**HEADERS, "Accept": "application/json"}
+    lineas: list[str] = []
+
+    # Formación académica
+    try:
+        r = requests.get(f"{api_base}/educations", headers=headers_json, timeout=15)
+        if r.ok:
+            data = r.json()
+            educaciones: list[str] = []
+            for grupo in data.get("affiliation-group", []):
+                for summary in grupo.get("summaries", []):
+                    ed = summary.get("education-summary", {})
+                    titulo = ed.get("role-title", "")
+                    org = (ed.get("organization") or {}).get("name", "")
+                    end_date = ed.get("end-date") or ed.get("start-date")
+                    year = ""
+                    if end_date:
+                        year = (end_date.get("year") or {}).get("value", "")
+                    if titulo:
+                        txt = titulo
+                        if org:
+                            txt += f" — {org}"
+                        if year:
+                            txt += f" ({year})"
+                        educaciones.append(txt)
+            if educaciones:
+                lineas.append("Formación académica:")
+                lineas.extend(f"  • {e}" for e in educaciones)
+    except Exception as exc:
+        logger.debug("ORCID educations fallo para %s: %s", orcid_id, exc)
+
+    # Obras / publicaciones
+    try:
+        r = requests.get(f"{api_base}/works", headers=headers_json, timeout=15)
+        if r.ok:
+            data = r.json()
+            obras: list[tuple[int, str]] = []
+            for grupo in data.get("group", []):
+                for summary in grupo.get("work-summary", []):
+                    title_obj = (summary.get("title") or {}).get("title") or {}
+                    title = title_obj.get("value", "")
+                    pub_date = summary.get("publication-date") or {}
+                    year_val = (pub_date.get("year") or {}).get("value", "")
+                    year_int = int(year_val) if year_val and year_val.isdigit() else 0
+                    if title:
+                        txt = title
+                        if year_val:
+                            txt += f" ({year_val})"
+                        obras.append((year_int, txt))
+
+            # Ordenar por año descendente
+            obras.sort(key=lambda x: x[0], reverse=True)
+            if obras:
+                lineas.append(f"\nPublicaciones ({len(obras)} encontradas):")
+                for _, o in obras[:MAX_PUBLICACIONES]:
+                    lineas.append(f"  • {o}")
+    except Exception as exc:
+        logger.debug("ORCID works fallo para %s: %s", orcid_id, exc)
+
+    if not lineas:
+        return None
+
+    return "\n".join(lineas)[:MAX_CHARS_PERFIL]
+
+
+def _extracto_researchgate(url: str) -> str | None:
+    """Intenta extraer información básica de ResearchGate (best-effort)."""
+    html = _fetch(url, timeout=20)
+    if not html:
+        return None
+
+    # ResearchGate bloquea bots frecuentemente
+    if "captcha" in html.lower() or "cf-browser-verification" in html.lower():
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+    _limpiar_dom(soup)
+
+    texto = soup.get_text("\n", strip=True)
+    texto = re.sub(r"\n{3,}", "\n\n", texto)
+
+    # Buscar secciones de publicaciones o about
+    kw = {"publications", "research", "publicaciones", "investigación"}
+    lineas = texto.split("\n")
+    buf: list[str] = []
+    capturando = False
+
+    for linea in lineas:
+        if any(kw_item in linea.lower() for kw_item in kw):
+            capturando = True
+            buf = [linea]
+        elif capturando:
+            buf.append(linea)
+            if len(buf) >= 40:
+                break
+
+    resultado = "\n".join(buf) if buf else texto[:1000]
+    return resultado[:MAX_CHARS_PERFIL] if resultado.strip() else None
+
+
+# ──────────── despacho por tipo de perfil y enriquecimiento de docentes ───────
+
+_EXTRACTORES = {
+    "CvLAC (Minciencias)": _extracto_cvlac,
+    "Google Scholar":      _extracto_google_scholar,
+    "ORCID":               _extracto_orcid,
+    "ResearchGate":        _extracto_researchgate,
+}
+
+
+def _enriquecer_enlace(tipo: str, url: str) -> tuple[str, str | None]:
+    """Descarga y extrae el contenido de un único perfil académico."""
+    extractor = _EXTRACTORES.get(tipo)
+    if extractor is None:
+        return tipo, None
+    try:
+        return tipo, extractor(url)
+    except Exception as exc:
+        logger.warning("Scraper: error enriqueciendo %s (%s): %s", tipo, url, exc)
+        return tipo, None
+
+
+def _enriquecer_docente(docente: dict) -> dict:
+    """Descarga en paralelo todos los perfiles académicos de un docente."""
+    docente = dict(docente)
+    enlaces_a_enriquecer = [
+        (e["tipo"], e["url"])
+        for e in docente.get("enlaces", [])
+        if e["tipo"] in _EXTRACTORES
+    ]
+
+    if not enlaces_a_enriquecer:
+        return docente
+
+    perfiles_texto: dict[str, str] = {}
+    # Usar hilos dentro del docente para sus distintos perfiles
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futuros = {
+            ex.submit(_enriquecer_enlace, tipo, url): tipo
+            for tipo, url in enlaces_a_enriquecer
+        }
+        for futuro in as_completed(futuros, timeout=30):
+            tipo, texto = futuro.result()
+            if texto:
+                perfiles_texto[tipo] = texto
+
+    if perfiles_texto:
+        docente["perfiles_texto"] = perfiles_texto
+
+    return docente
+
+
 # ───────────────── extracción estructurada de la página /team/ ────────────────
 
 _DEGREE_RE = re.compile(
@@ -138,7 +425,6 @@ _DEGREE_RE = re.compile(
 
 
 def _docente_desde_card(card) -> dict | None:
-    """Extrae nombre/rol/enlaces a partir de un card `.member` del tema actual."""
     nombre = None
     for h in card.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
         t = h.get_text(" ", strip=True)
@@ -177,33 +463,23 @@ def _docente_desde_card(card) -> dict | None:
     return {"nombre": nombre, "rol": rol, "enlaces": enlaces}
 
 
-def _extraer_docentes(soup: BeautifulSoup) -> list[dict]:
-    """Agrupa enlaces académicos por docente.
-
-    Detector primario: `div.member` (estructura del tema actual del sitio).
-    Si el tema cambia y no hay coincidencias, cae a la heurística por
-    cluster de enlaces académicos.
-    """
+def _extraer_docentes_bruto(soup: BeautifulSoup) -> list[dict]:
+    """Extrae nombre/rol/enlaces de cada docente sin enriquecer."""
     docentes: list[dict] = []
 
-    # ── Detector primario por clase del tema ─────────────────────────────────
     for card in soup.select("div.member, .team-member, .member-card"):
         d = _docente_desde_card(card)
         if d:
             docentes.append(d)
 
     if docentes:
-        # Deduplicar por nombre.
         vistos: set[str] = set()
-        unicos: list[dict] = []
-        for d in docentes:
-            if d["nombre"] in vistos:
-                continue
-            vistos.add(d["nombre"])
-            unicos.append(d)
-        return unicos
+        return [
+            d for d in docentes
+            if d["nombre"] not in vistos and not vistos.add(d["nombre"])  # type: ignore[func-returns-value]
+        ]
 
-    # ── Fallback heurístico (por si cambia el tema del sitio) ─────────────────
+    # Fallback heurístico
     visitados: set[int] = set()
     anclas_academicas = [
         a for a in soup.find_all("a", href=True)
@@ -221,25 +497,19 @@ def _extraer_docentes(soup: BeautifulSoup) -> list[dict]:
                 if _clasificar_enlace(a["href"])
             ]
             if len(hermanos) >= min_links:
-                # Y que contenga un heading con marcador de grado académico.
                 for h in c.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
                     if _DEGREE_RE.search(h.get_text(" ", strip=True) or ""):
                         return c
                 if min_links >= 2:
-                    return c  # Cluster grande sin grado: aún así lo aceptamos.
+                    return c
         return None
 
     for ancla in anclas_academicas:
-        container = _buscar_container(ancla, min_links=2)
-        if container is None:
-            # Fallback para docentes con un único perfil (p. ej. sólo CvLAC):
-            # exigimos heading con grado para evitar capturar enlaces sueltos.
-            container = _buscar_container(ancla, min_links=1)
+        container = _buscar_container(ancla, min_links=2) or _buscar_container(ancla, min_links=1)
         if container is None or id(container) in visitados:
             continue
         visitados.add(id(container))
 
-        # Buscar el nombre: heading cercano dentro del contenedor o subiendo.
         nombre = None
         scope = container
         for _ in range(4):
@@ -255,7 +525,6 @@ def _extraer_docentes(soup: BeautifulSoup) -> list[dict]:
             scope = scope.parent
 
         if not nombre:
-            # Fallback: cualquier heading cercano legible.
             for h in container.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
                 t = h.get_text(" ", strip=True)
                 if t and 5 < len(t) < 140:
@@ -265,7 +534,6 @@ def _extraer_docentes(soup: BeautifulSoup) -> list[dict]:
         if not nombre:
             continue
 
-        # Rol: primer párrafo/span con texto significativo distinto al nombre.
         rol = None
         for p in container.find_all(["p", "span", "em", "i", "small"]):
             t = p.get_text(" ", strip=True)
@@ -278,7 +546,6 @@ def _extraer_docentes(soup: BeautifulSoup) -> list[dict]:
                 rol = t
                 break
 
-        # Recolectar y deduplicar enlaces académicos del cluster.
         enlaces: list[dict] = []
         urls_vistas: set[str] = set()
         for a in container.find_all("a", href=True):
@@ -294,33 +561,72 @@ def _extraer_docentes(soup: BeautifulSoup) -> list[dict]:
         if enlaces:
             docentes.append({"nombre": nombre, "rol": rol, "enlaces": enlaces})
 
-    # Deduplicar docentes por nombre conservando el primero.
     vistos_nombres: set[str] = set()
-    unicos: list[dict] = []
-    for d in docentes:
-        if d["nombre"] in vistos_nombres:
-            continue
-        vistos_nombres.add(d["nombre"])
-        unicos.append(d)
-    return unicos
+    return [
+        d for d in docentes
+        if d["nombre"] not in vistos_nombres and not vistos_nombres.add(d["nombre"])  # type: ignore[func-returns-value]
+    ]
+
+
+def _extraer_docentes(soup: BeautifulSoup) -> list[dict]:
+    """Extrae docentes y enriquece sus perfiles en paralelo."""
+    brutos = _extraer_docentes_bruto(soup)
+    if not brutos:
+        return []
+
+    logger.info(
+        "Scraper: enriqueciendo %d docentes con sus perfiles académicos...",
+        len(brutos),
+    )
+
+    enriquecidos: list[dict] = []
+    # Un hilo por docente para paralelizar entre docentes
+    with ThreadPoolExecutor(max_workers=min(len(brutos), 8)) as ex:
+        futuros = {ex.submit(_enriquecer_docente, d): d["nombre"] for d in brutos}
+        for futuro in as_completed(futuros, timeout=120):
+            try:
+                enriquecidos.append(futuro.result())
+            except Exception as exc:
+                nombre = futuros[futuro]
+                logger.warning("Scraper: enriquecimiento falló para %s: %s", nombre, exc)
+
+    # Restaurar orden original
+    orden = {d["nombre"]: i for i, d in enumerate(brutos)}
+    enriquecidos.sort(key=lambda d: orden.get(d["nombre"], 999))
+    return enriquecidos
 
 
 def _formatear_docentes(docentes: list[dict]) -> str:
     if not docentes:
         return ""
+
     lineas = [
-        "### Directorio estructurado de docentes / investigadores del GIA",
-        "(Cada docente con todos sus perfiles académicos verificados de la "
-        "página oficial. Cita estos enlaces cuando el usuario pregunte por un "
-        "investigador específico.)",
+        "### Directorio de docentes / investigadores del GIA",
+        (
+            "Cada docente incluye sus perfiles académicos verificados y, cuando "
+            "fue posible obtenerlos, el contenido de dichos perfiles (títulos "
+            "académicos, publicaciones, etc.). Usa esta información para responder "
+            "preguntas específicas sobre formación y producción académica."
+        ),
     ]
+
     for d in docentes:
         lineas.append("")
-        lineas.append(f"**{d['nombre']}**")
+        lineas.append(f"#### {d['nombre']}")
         if d.get("rol"):
-            lineas.append(f"- Rol: {d['rol']}")
+            lineas.append(f"Rol: {d['rol']}")
+        lineas.append("Perfiles académicos:")
         for enlace in d["enlaces"]:
-            lineas.append(f"- {enlace['tipo']}: {enlace['url']}")
+            lineas.append(f"  - {enlace['tipo']}: {enlace['url']}")
+
+        perfiles_texto: dict[str, str] = d.get("perfiles_texto", {})
+        if perfiles_texto:
+            lineas.append("Información extraída de sus perfiles:")
+            for tipo, texto in perfiles_texto.items():
+                lineas.append(f"\n  [{tipo}]")
+                for linea_perfil in texto.split("\n"):
+                    lineas.append(f"  {linea_perfil}")
+
     return "\n".join(lineas)
 
 
@@ -395,16 +701,17 @@ def _guardar_cache(contexto: str) -> None:
 def obtener_contexto_web(force_refresh: bool = False) -> str:
     """Devuelve el contexto agregado de las páginas del GIA.
 
-    Usa la caché en disco si está vigente (24 h), salvo que `force_refresh`
-    sea True. Si la red falla, devuelve marcadores de error en las páginas
-    que no se pudieron obtener para no romper el arranque del servidor.
+    Usa la caché en disco si está vigente (24 h). Si la red falla, devuelve
+    marcadores de error en las páginas que no se pudieron obtener.
     """
     if not force_refresh:
         cache = _leer_cache()
         if cache:
             logger.info("Scraper: usando contexto cacheado.")
             return cache
-    logger.info("Scraper: descargando contexto fresco del sitio del GIA.")
+    logger.info(
+        "Scraper: descargando contexto fresco del GIA (incluye perfiles académicos)..."
+    )
     contexto = _construir_contexto()
     _guardar_cache(contexto)
     return contexto
