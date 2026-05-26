@@ -1,9 +1,13 @@
+from typing import Optional
+
 from fastapi import APIRouter
 from models.message import Message
 from services.ai_service import generar_respuesta
 from services.auth_service import verificar_credenciales
 from fastapi.responses import FileResponse
+from services.complete_pdf import pdf_completer
 import re
+
 
 router = APIRouter()
 
@@ -24,10 +28,34 @@ ALIASES_17 = [
     "plan acción"
 ]
 
+# ── Alias para detectar intención de COMPLETAR (no solo descargar) ────────────
+ALIASES_COMPLETAR = [
+    "completar", "llenar", "rellenar", "diligenciar", "llena este", "completa este"
+]
+
+def detectar_intencion_completar(mensaje: str):
+    """Detecta si el usuario quiere COMPLETAR un PDF en lugar de solo descargarlo.
+    Retorna 13, 17 o None."""
+    msg = mensaje.lower()
+    
+    # Debe tener una palabra de completado
+    tiene_verbo_completar = any(v in msg for v in ALIASES_COMPLETAR)
+    if not tiene_verbo_completar:
+        return None
+    
+    # Detectar cuál PDF quiere completar
+    if any(alias in msg for alias in ALIASES_13):
+        return 13
+    if any(alias in msg for alias in ALIASES_17):
+        return 17
+    
+    return None
+
 VERBOS_SOLICITUD = [
     "genera", "généra", "envía", "envia", "manda", "dame", "necesito",
     "quiero", "descarga", "obten", "obtén", "proporciona", "muéstrame",
-    "muestrame", "pásamelo", "pasamelo", "ahora", "también", "tambien"
+    "muestrame", "pásamelo", "pasamelo", "ahora", "también", "tambien",
+    "completar", "rellenar", "llenar", "completa", "rellena", "llena  "
 ]
 
 
@@ -156,11 +184,74 @@ async def chat(data: Message):
                          "tu identidad.\n\n👤 Por favor ingresa tu **usuario**:"
             }
 
-    # ── Respuesta normal del bot ──────────────────────────────────────────────
-    reply = generar_respuesta(mensaje, data.history)
-    return {"reply": reply}
-
-
-@router.get("/download/{filename}")
-def download_file(filename: str):
-    return FileResponse(path=filename, filename=filename)
+    # ── NUEVO: Detectar intención de COMPLETAR PDF ────────────────────────────
+    pdf_a_completar = detectar_intencion_completar(mensaje)
+    
+    if pdf_a_completar:
+        if autenticado:
+            # Iniciar flujo de completado
+            sesiones_activas[session_id] = {
+                "paso": "completando_pdf",
+                "pdf_numero": pdf_a_completar,
+                "datos_recolectados": {},
+                "campo_actual": 0,
+                "campos_pendientes": pdf_completer.PDF_CONFIG[pdf_a_completar]["campos"]
+            }
+            
+            primer_campo = sesiones_activas[session_id]["campos_pendientes"][0]
+            return {
+                "reply": f"📝 Vamos a completar el **{pdf_completer.PDF_CONFIG[pdf_a_completar]['descripcion']}**.\n\n"
+                         f"Por favor, dime el **{primer_campo.replace('_', ' ').title()}**:"
+            }
+        else:
+            # Primero autenticar, luego completar
+            sesiones_activas[session_id] = {
+                "paso": "esperando_usuario",
+                "pdfs_solicitados": [pdf_a_completar],
+                "completar_despues": True,  # Flag para saber que después debe llenar
+                "usuario_ingresado": None,
+                "autenticado": False,
+                "docente": None,
+            }
+            return {
+                "reply": "🔒 Para acceder a los documentos necesito verificar tu identidad.\n\n"
+                         "👤 Por favor ingresa tu **usuario**:"
+            }
+    
+    # ── Flujo de completado de PDF en curso ───────────────────────────────────
+    if estado and estado.get("paso") == "completando_pdf":
+        campos = estado["campos_pendientes"]
+        idx_actual = estado["campo_actual"]
+        
+        # Guardar el dato actual
+        campo = campos[idx_actual]
+        estado["datos_recolectados"][campo] = mensaje.strip()
+        
+        # Avanzar al siguiente campo
+        if idx_actual + 1 < len(campos):
+            estado["campo_actual"] += 1
+            siguiente_campo = campos[estado["campo_actual"]]
+            return {
+                "reply": f"Gracias. Ahora, dime el **{siguiente_campo.replace('_', ' ').title()}**:"
+            }
+        else:
+            # Todos los campos recolectados → generar PDF
+            pdf_numero = estado["pdf_numero"]
+            datos = estado["datos_recolectados"]
+            
+            # Generar el PDF completado
+            try:
+                output_path = pdf_completer.completar_pdf(pdf_numero, datos)
+                nombre_archivo = os.path.basename(output_path)
+                
+                # Limpiar sesión
+                del sesiones_activas[session_id]
+                
+                return {
+                    "reply": f"✅ ¡PDF completado exitosamente!\n\n"
+                             f"📄 Descarga tu documento aquí: [Descargar](/download/{nombre_archivo})"
+                }
+            except Exception as e:
+                return {
+                    "reply": f"❌ Ocurrió un error al generar el PDF: {str(e)}"
+                }
