@@ -255,3 +255,7 @@ async def chat(data: Message):
                 return {
                     "reply": f"❌ Ocurrió un error al generar el PDF: {str(e)}"
                 }
+
+    # ── Chat normal: delegar al modelo ────────────────────────────────────────
+    respuesta = generar_respuesta(mensaje, data.history)
+    return {"reply": respuesta}

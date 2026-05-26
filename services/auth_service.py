@@ -32,12 +32,13 @@ def agregar_docente(nombre: str, usuario: str, password: str):
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "INSERT INTO docentes (nombre, usuario, password) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO docentes (nombre, usuario, password) VALUES (?, ?, ?)",
             (nombre, usuario, hash_password(password))
         )
         conn.commit()
-        print(f"✅ Docente '{nombre}' agregado correctamente.")
+        if cursor.rowcount > 0:
+            print(f"[OK] Docente '{nombre}' agregado correctamente.")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"[ERROR] {e}")
     finally:
         conn.close()

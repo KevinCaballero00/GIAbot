@@ -20,4 +20,4 @@ def crear_docentes():
         password="clave456"
     )
 
-    print("\n✅ Docentes registrados en la base de datos.")
+    print("\n[OK] Docentes registrados en la base de datos.")
