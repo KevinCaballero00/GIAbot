@@ -1,9 +1,12 @@
+import asyncio
+import os
 from typing import Optional
 
 from fastapi import APIRouter
 from models.message import Message
 from services.ai_service import generar_respuesta
 from services.auth_service import verificar_credenciales
+from services.extractor_proyectos import extraer_proyectos
 from fastapi.responses import FileResponse
 from services.complete_pdf import pdf_completer
 import re
@@ -102,7 +105,7 @@ def detectar_pdf_solicitado(mensaje: str, historial: list):
 
 
 def construir_respuesta_pdfs(pdfs: list) -> str:
-    """Construye el mensaje con los enlaces de descarga."""
+    """Construye el mensaje con los enlaces de descarga de los PDFs estáticos."""
     enlaces = []
     if 13 in pdfs:
         enlaces.append(
@@ -116,6 +119,30 @@ def construir_respuesta_pdfs(pdfs: list) -> str:
         )
     intro = "Aquí tienes los documentos solicitados:" if len(enlaces) == 2 else "Aquí tienes el documento solicitado:"
     return intro + "\n\n" + "\n\n".join(enlaces)
+
+
+async def construir_respuesta_con_extraccion(pdfs: list) -> str:
+    """Entrega los PDFs estáticos y dispara la extracción de proyectos desde las fuentes web."""
+    respuesta_pdfs = construir_respuesta_pdfs(pdfs)
+    try:
+        resultado = await asyncio.to_thread(extraer_proyectos)
+        nombre_archivo = resultado["_nombre_archivo"]
+        total = resultado["metadata"]["total_entradas"]
+        errores = resultado["metadata"]["fuentes_con_error"]
+        bloque_extraccion = (
+            f"\n\n---\n"
+            f"📊 **Datos extraídos automáticamente para el informe**\n"
+            f"Se recopiló información desde las fuentes web del GIA ({total} entradas)."
+        )
+        if errores:
+            bloque_extraccion += f"\n⚠️ Fuentes con error: {', '.join(errores)}"
+        bloque_extraccion += (
+            f"\n👉 [Descargar datos extraídos (JSON)](/static/extracciones/{nombre_archivo})\n"
+            f"_(Usa este archivo como insumo para revisar y completar el informe antes de generar el PDF final)_"
+        )
+        return respuesta_pdfs + bloque_extraccion
+    except Exception as exc:
+        return respuesta_pdfs + f"\n\n⚠️ No se pudo completar la extracción automática de datos: {exc}"
 
 
 @router.post("/chat")
@@ -144,9 +171,10 @@ async def chat(data: Message):
                 sesiones_activas[session_id]["docente"] = docente
                 sesiones_activas[session_id]["paso"] = "autenticado"
                 pdfs = estado["pdfs_solicitados"]
+                respuesta_docs = await construir_respuesta_con_extraccion(pdfs)
                 return {
                     "reply": f"✅ Bienvenido/a, **{docente['nombre']}**. Acceso verificado.\n\n"
-                             + construir_respuesta_pdfs(pdfs)
+                             + respuesta_docs
                 }
             else:
                 # Credenciales incorrectas: limpiar sesión
@@ -168,8 +196,8 @@ async def chat(data: Message):
 
     if pdfs_solicitados:
         if autenticado:
-            # Ya está autenticado, entrega directamente
-            return {"reply": construir_respuesta_pdfs(pdfs_solicitados)}
+            # Ya está autenticado, entrega directamente + extracción web
+            return {"reply": await construir_respuesta_con_extraccion(pdfs_solicitados)}
         else:
             # Iniciar flujo de autenticación
             sesiones_activas[session_id] = {
