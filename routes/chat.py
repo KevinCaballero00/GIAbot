@@ -1,15 +1,17 @@
 import asyncio
 import os
-from typing import Optional
+import re
+from pathlib import Path
 
 from fastapi import APIRouter
+from fastapi.responses import FileResponse
+
 from models.message import Message
 from services.ai_service import generar_respuesta
 from services.auth_service import verificar_credenciales
-from services.extractor_proyectos import extraer_proyectos
-from fastapi.responses import FileResponse
 from services.complete_pdf import pdf_completer
-import re
+from services.extractor_proyectos import extraer_proyectos
+from services.pdf_generate import generar_pdf_fo_in_13
 
 
 router = APIRouter()
@@ -104,45 +106,55 @@ def detectar_pdf_solicitado(mensaje: str, historial: list):
     return []
 
 
-def construir_respuesta_pdfs(pdfs: list) -> str:
-    """Construye el mensaje con los enlaces de descarga de los PDFs estáticos."""
-    enlaces = []
-    if 13 in pdfs:
-        enlaces.append(
-            "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
-            "👉 [Descargar PDF](/static/docs/FO-IN-13%20INFORME%20GESTION%20GRUPOS%20INV%20V1.pdf)"
-        )
+async def construir_respuesta_con_extraccion(
+    pdfs: list,
+    docente: dict | None = None,
+) -> str:
+    """
+    Construye la respuesta para una solicitud de PDFs.
+
+    FO-IN-17: enlace de descarga estático.
+    FO-IN-13: extracción automática + generación de PDF desde el JSON.
+    """
+    partes: list[str] = []
+
     if 17 in pdfs:
-        enlaces.append(
+        partes.append(
             "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
             "👉 [Descargar PDF](/static/docs/FO-IN-17%20PLAN%20DE%20ACCION%20GRUPOS%20INV%20V1.pdf)"
         )
-    intro = "Aquí tienes los documentos solicitados:" if len(enlaces) == 2 else "Aquí tienes el documento solicitado:"
-    return intro + "\n\n" + "\n\n".join(enlaces)
 
+    if 13 in pdfs:
+        try:
+            resultado = await asyncio.to_thread(extraer_proyectos, docente)
+            nombre_json = resultado["_nombre_archivo"]
+            total = len(resultado["proyectos"])
+            errores = resultado["errores"]
 
-async def construir_respuesta_con_extraccion(pdfs: list) -> str:
-    """Entrega los PDFs estáticos y dispara la extracción de proyectos desde las fuentes web."""
-    respuesta_pdfs = construir_respuesta_pdfs(pdfs)
-    try:
-        resultado = await asyncio.to_thread(extraer_proyectos)
-        nombre_archivo = resultado["_nombre_archivo"]
-        total = resultado["metadata"]["total_entradas"]
-        errores = resultado["metadata"]["fuentes_con_error"]
-        bloque_extraccion = (
-            f"\n\n---\n"
-            f"📊 **Datos extraídos automáticamente para el informe**\n"
-            f"Se recopiló información desde las fuentes web del GIA ({total} entradas)."
-        )
-        if errores:
-            bloque_extraccion += f"\n⚠️ Fuentes con error: {', '.join(errores)}"
-        bloque_extraccion += (
-            f"\n👉 [Descargar datos extraídos (JSON)](/static/extracciones/{nombre_archivo})\n"
-            f"_(Usa este archivo como insumo para revisar y completar el informe antes de generar el PDF final)_"
-        )
-        return respuesta_pdfs + bloque_extraccion
-    except Exception as exc:
-        return respuesta_pdfs + f"\n\n⚠️ No se pudo completar la extracción automática de datos: {exc}"
+            ruta_pdf = await asyncio.to_thread(generar_pdf_fo_in_13, resultado)
+            nombre_pdf = Path(ruta_pdf).name
+
+            bloque = (
+                "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
+                f"Se recopiló información desde las fuentes web del GIA ({total} entradas).\n"
+                f"👉 [Descargar datos extraídos (JSON)](/static/extracciones/{nombre_json})\n"
+                f"👉 [Descargar informe (PDF)](/static/generados/{nombre_pdf})"
+            )
+            if errores:
+                bloque += f"\n⚠️ Fuentes con error: {', '.join(str(e) for e in errores[:3])}"
+            partes.append(bloque)
+        except Exception as exc:
+            partes.append(
+                "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
+                f"⚠️ No se pudo completar la extracción automática: {exc}"
+            )
+
+    intro = (
+        "Aquí tienes los documentos solicitados:"
+        if len(pdfs) > 1
+        else "Aquí tienes el documento solicitado:"
+    )
+    return intro + "\n\n" + "\n\n".join(partes)
 
 
 @router.post("/chat")
@@ -171,7 +183,7 @@ async def chat(data: Message):
                 sesiones_activas[session_id]["docente"] = docente
                 sesiones_activas[session_id]["paso"] = "autenticado"
                 pdfs = estado["pdfs_solicitados"]
-                respuesta_docs = await construir_respuesta_con_extraccion(pdfs)
+                respuesta_docs = await construir_respuesta_con_extraccion(pdfs, docente)
                 return {
                     "reply": f"✅ Bienvenido/a, **{docente['nombre']}**. Acceso verificado.\n\n"
                              + respuesta_docs
@@ -197,7 +209,7 @@ async def chat(data: Message):
     if pdfs_solicitados:
         if autenticado:
             # Ya está autenticado, entrega directamente + extracción web
-            return {"reply": await construir_respuesta_con_extraccion(pdfs_solicitados)}
+            return {"reply": await construir_respuesta_con_extraccion(pdfs_solicitados, estado["docente"])}
         else:
             # Iniciar flujo de autenticación
             sesiones_activas[session_id] = {

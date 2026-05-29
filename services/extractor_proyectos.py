@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -249,14 +250,41 @@ def _obtener_docentes_cvlac() -> list[tuple[str, str]]:
     return resultado
 
 
+# ──────────────────────────── utilidades de período ──────────────────────────
+
+def calcular_periodo() -> tuple[str, int, int]:
+    """Calcula el período académico actual. Retorna (periodo_str, semestre, anio)."""
+    hoy = datetime.now()
+    semestre = 1 if 2 <= hoy.month <= 7 else 2
+    return f"{hoy.year}-{semestre}", semestre, hoy.year
+
+
+def _normalizar_nombre(nombre: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", nombre.lower())
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _nombre_coincide(nombre_db: str, nombre_web: str) -> bool:
+    palabras_db = set(_normalizar_nombre(nombre_db).split())
+    palabras_web = set(_normalizar_nombre(nombre_web).split())
+    return len(palabras_db & palabras_web) >= 2
+
+
 # ────────────────────────────── orquestador ──────────────────────────────────
 
-def extraer_proyectos() -> dict:
+def extraer_proyectos(docente: dict | None = None) -> dict:
     """
-    Extrae proyectos de todas las fuentes, guarda el resultado en JSON
-    y lo retorna. El dict incluye:
-      - metadata: fecha, duración, total de entradas, errores por fuente
+    Extrae proyectos de todas las fuentes, guarda el resultado en JSON y lo retorna.
+
+    Si se proporciona `docente`, solo se consulta el CvLAC que coincida con ese nombre.
+    El dict retornado incluye:
+      - docente: datos del docente autenticado (o None)
+      - periodo: período académico calculado (ej. "2026-1")
       - proyectos: lista de entradas normalizadas
+      - fuentes_consultadas: lista de fuentes intentadas
+      - errores: mensajes de error por fuente
+      - fecha_extraccion: timestamp ISO de inicio
+      - duracion_segundos: tiempo total de extracción
       - _ruta_archivo: ruta absoluta del JSON generado
       - _nombre_archivo: nombre del archivo para construir el enlace
     """
@@ -264,8 +292,12 @@ def extraer_proyectos() -> dict:
     inicio = datetime.utcnow()
     todas: list[dict] = []
     errores: list[str] = []
+    fuentes_consultadas: list[str] = []
+
+    periodo, _, _ = calcular_periodo()
 
     # 1. Página institucional /proyectos/
+    fuentes_consultadas.append("GIA Web – /proyectos/")
     try:
         entradas_gia = _extraer_proyectos_gia()
         todas.extend(entradas_gia)
@@ -275,11 +307,26 @@ def extraer_proyectos() -> dict:
         logger.warning("Extractor: fallo – %s", msg)
         errores.append(msg)
 
-    # 2. Perfiles CvLAC en paralelo
-    docentes_cvlac = _obtener_docentes_cvlac()
-    logger.info("Extractor: %d docentes con CvLAC", len(docentes_cvlac))
+    # 2. Perfiles CvLAC (filtrados al docente si se proporcionó)
+    todos_cvlac = _obtener_docentes_cvlac()
+    if docente:
+        docentes_cvlac = [
+            (n, u) for n, u in todos_cvlac
+            if _nombre_coincide(docente["nombre"], n)
+        ]
+        logger.info(
+            "Extractor: filtrando CvLAC para '%s' – %d coincidencias",
+            docente["nombre"], len(docentes_cvlac),
+        )
+    else:
+        docentes_cvlac = todos_cvlac
+
+    logger.info("Extractor: %d docentes con CvLAC a consultar", len(docentes_cvlac))
 
     if docentes_cvlac:
+        for nombre_doc, _ in docentes_cvlac:
+            fuentes_consultadas.append(f"CvLAC de {nombre_doc}")
+
         with ThreadPoolExecutor(max_workers=min(len(docentes_cvlac), 6)) as ex:
             futuros = {
                 ex.submit(_extraer_proyectos_cvlac, nombre, url): nombre
@@ -301,18 +348,19 @@ def extraer_proyectos() -> dict:
 
     fin = datetime.utcnow()
     resultado = {
-        "metadata": {
-            "fecha_extraccion": inicio.isoformat(),
-            "duracion_segundos": round((fin - inicio).total_seconds(), 2),
-            "total_entradas": len(todas),
-            "fuentes_con_error": errores,
-        },
+        "docente": docente,
+        "periodo": periodo,
         "proyectos": todas,
+        "fuentes_consultadas": fuentes_consultadas,
+        "errores": errores,
+        "fecha_extraccion": inicio.isoformat(),
+        "duracion_segundos": round((fin - inicio).total_seconds(), 2),
     }
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ts = inicio.strftime("%Y%m%d_%H%M%S")
-    nombre_archivo = f"proyectos_{ts}.json"
+    usuario_slug = docente["usuario"] if docente else "todos"
+    nombre_archivo = f"proyectos_{usuario_slug}_{ts}.json"
     ruta = OUTPUT_DIR / nombre_archivo
     ruta.write_text(json.dumps(resultado, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("Extractor: resultado guardado en %s", ruta)
