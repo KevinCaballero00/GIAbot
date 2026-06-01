@@ -11,6 +11,7 @@ from services.ai_service import generar_respuesta
 from services.auth_service import verificar_credenciales
 from services.complete_pdf import pdf_completer
 from services.extractor_proyectos import extraer_proyectos
+from services.pdf_fo_in_17 import generar_pdf_fo_in_17_plantilla
 from services.pdf_generate import generar_pdf_fo_in_13
 
 
@@ -119,10 +120,20 @@ async def construir_respuesta_con_extraccion(
     partes: list[str] = []
 
     if 17 in pdfs:
-        partes.append(
-            "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
-            "👉 [Descargar PDF](/static/docs/FO-IN-17%20PLAN%20DE%20ACCION%20GRUPOS%20INV%20V1.pdf)"
-        )
+        try:
+            resultado_17 = await asyncio.to_thread(extraer_proyectos, docente)
+            ruta_17 = await asyncio.to_thread(generar_pdf_fo_in_17_plantilla, resultado_17)
+            nombre_17 = Path(ruta_17).name
+            partes.append(
+                "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
+                f"👉 [Descargar informe (PDF)](/static/generados/{nombre_17})"
+            )
+        except Exception as exc:
+            partes.append(
+                "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
+                f"⚠️ No se pudo generar el PDF: {exc}\n"
+                "👉 [Descargar plantilla base](/static/docs/FO-IN-17%20PLAN%20DE%20ACCION%20GRUPOS%20INV%20V1.pdf)"
+            )
 
     if 13 in pdfs:
         try:

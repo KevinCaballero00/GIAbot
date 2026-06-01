@@ -117,10 +117,16 @@ def _build_styles() -> dict:
 
 def generar_pdf_fo_in_13(resultado: dict) -> str:
     """
-    Genera el PDF completo del FO-IN-13 desde el dict normalizado de extraer_proyectos.
-    Las descripciones se incluyen completas, sin truncar.
+    Genera el PDF del FO-IN-13 con formato fiel al documento oficial.
+    Delega al nuevo template; mantiene este nombre para compatibilidad con routes/chat.py.
     Retorna la ruta absoluta del archivo generado.
     """
+    from services.pdf_fo_in_13 import generar_pdf_fo_in_13_plantilla
+    return generar_pdf_fo_in_13_plantilla(resultado)
+
+
+def _generar_pdf_fo_in_13_legacy(resultado: dict) -> str:
+    """Implementación anterior (respaldo)."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     docente_info = resultado.get("docente") or {}
