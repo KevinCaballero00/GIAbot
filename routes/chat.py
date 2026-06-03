@@ -1,21 +1,43 @@
 import asyncio
+import logging
 import os
 import re
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from models.message import Message
 from services.ai_service import generar_respuesta
 from services.auth_service import verificar_credenciales
 from services.complete_pdf import pdf_completer
-from services.extractor_proyectos import extraer_proyectos
-from services.pdf_fo_in_17 import generar_pdf_fo_in_17_plantilla
-from services.pdf_generate import generar_pdf_fo_in_13
+from services.extractor_proyectos import (
+    calcular_periodo,
+    _obtener_docentes_cvlac,
+    _normalizar_nombre,
+)
+from services.fo_in_13_service import generar_fo_in_13
+from services.fo_in_17_service import generar_fo_in_17
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# ── Directorio y nombres oficiales de los PDFs generados ──────────────────────
+GENERADOS_DIR = Path(__file__).resolve().parent.parent / "static" / "generados"
+NOMBRES_OFICIALES = {
+    "13": "FO-IN-13 INFORME GESTION GRUPOS INV V1.pdf",
+    "17": "FO-IN-17 PLAN DE ACCION GRUPOS INV V1.pdf",
+}
+
+# Palabras a ignorar al detectar el nombre de un docente en el mensaje
+_STOPWORDS_NOMBRE = {
+    "de", "del", "la", "el", "los", "las", "grupo", "gia", "docente", "profe",
+    "profesor", "profesora", "investigador", "investigadora", "proyectos",
+    "proyecto", "informe", "plan", "accion", "gestion", "para", "con", "que",
+    "trabajados", "trabajado", "por", "una", "uno",
+}
 
 # ── Sesiones activas en memoria { session_id: {docente, estado} } ─────────────
 # La session_id se construye desde el frontend (ver nota abajo)
@@ -107,27 +129,78 @@ def detectar_pdf_solicitado(mensaje: str, historial: list):
     return []
 
 
+def detectar_docente_solicitado(mensaje: str) -> dict | None:
+    """
+    Detecta si el mensaje menciona a un docente específico del GIA (ej. "los
+    proyectos de Ana Gissele", "lo de Puerto"). Compara los tokens del mensaje
+    contra la lista de docentes del /team/ (con CvLAC) y devuelve el que mejor
+    coincida como {"nombre": ..., "cvlac_url": ...}, o None si no se menciona a
+    nadie reconocible (en cuyo caso se usa el docente autenticado).
+    """
+    msg_norm = _normalizar_nombre(mensaje or "")
+    if not msg_norm.strip():
+        return None
+
+    try:
+        team = _obtener_docentes_cvlac()
+    except Exception as exc:
+        logger.warning("No se pudo obtener la lista de docentes para detección: %s", exc)
+        return None
+
+    mejor: dict | None = None
+    mejor_hits = 0
+    for nombre, url in team:
+        tokens = {
+            t for t in _normalizar_nombre(nombre).split()
+            if len(t) >= 3 and t not in _STOPWORDS_NOMBRE
+        }
+        hits = sum(1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", msg_norm))
+        if hits > mejor_hits:
+            mejor_hits = hits
+            mejor = {"nombre": nombre, "cvlac_url": url}
+
+    if mejor:
+        logger.info("Docente solicitado detectado: %s (%d coincidencias)",
+                    mejor["nombre"], mejor_hits)
+    return mejor
+
+
 async def construir_respuesta_con_extraccion(
     pdfs: list,
     docente: dict | None = None,
+    docente_objetivo: dict | None = None,
 ) -> str:
     """
     Construye la respuesta para una solicitud de PDFs.
 
-    FO-IN-17: enlace de descarga estático.
-    FO-IN-13: extracción automática + generación de PDF desde el JSON.
+    FO-IN-17: documento fuente del semestre actual — extrae, persiste y genera PDF.
+    FO-IN-13: documento derivado — usa el FO-IN-17 del semestre anterior como fuente.
+
+    `docente_objetivo` (opcional): docente cuyos proyectos se piden realmente,
+    detectado del mensaje (ej. "los proyectos de Ana Gissele").
     """
+    semestre_actual, _, _ = calcular_periodo()
     partes: list[str] = []
+    nota_objetivo = (
+        f"\n👤 Proyectos atribuidos a: **{docente_objetivo['nombre']}**"
+        if docente_objetivo else ""
+    )
 
     if 17 in pdfs:
         try:
-            resultado_17 = await asyncio.to_thread(extraer_proyectos, docente)
-            ruta_17 = await asyncio.to_thread(generar_pdf_fo_in_17_plantilla, resultado_17)
-            nombre_17 = Path(ruta_17).name
-            partes.append(
-                "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
-                f"👉 [Descargar informe (PDF)](/static/generados/{nombre_17})"
+            resultado_17 = await asyncio.to_thread(
+                generar_fo_in_17, docente, semestre_actual, docente_objetivo
             )
+            nombre_17 = resultado_17["pdf_nombre"]
+            advertencia = resultado_17.get("advertencia", "")
+            bloque = (
+                "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
+                f"Semestre: {semestre_actual}{nota_objetivo}\n"
+                f"👉 [Descargar informe (PDF)](/descargar/17/{nombre_17})"
+            )
+            if advertencia:
+                bloque += f"\n⚠️ {advertencia}"
+            partes.append(bloque)
         except Exception as exc:
             partes.append(
                 "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
@@ -137,27 +210,20 @@ async def construir_respuesta_con_extraccion(
 
     if 13 in pdfs:
         try:
-            resultado = await asyncio.to_thread(extraer_proyectos, docente)
-            nombre_json = resultado["_nombre_archivo"]
-            total = len(resultado["proyectos"])
-            errores = resultado["errores"]
-
-            ruta_pdf = await asyncio.to_thread(generar_pdf_fo_in_13, resultado)
-            nombre_pdf = Path(ruta_pdf).name
-
-            bloque = (
-                "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
-                f"Se recopiló información desde las fuentes web del GIA ({total} entradas).\n"
-                f"👉 [Descargar datos extraídos (JSON)](/static/extracciones/{nombre_json})\n"
-                f"👉 [Descargar informe (PDF)](/static/generados/{nombre_pdf})"
+            resultado_13 = await asyncio.to_thread(
+                generar_fo_in_13, docente, semestre_actual, docente_objetivo
             )
-            if errores:
-                bloque += f"\n⚠️ Fuentes con error: {', '.join(str(e) for e in errores[:3])}"
-            partes.append(bloque)
+            nombre_13 = resultado_13["pdf_nombre"]
+            sem_ref = resultado_13["semestre_referencia"]
+            partes.append(
+                "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
+                f"Generado a partir del Plan de Acción (FO-IN-17) del semestre {sem_ref}.{nota_objetivo}\n"
+                f"👉 [Descargar informe (PDF)](/descargar/13/{nombre_13})"
+            )
         except Exception as exc:
             partes.append(
                 "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
-                f"⚠️ No se pudo completar la extracción automática: {exc}"
+                f"⚠️ No se pudo generar el informe: {exc}"
             )
 
     intro = (
@@ -166,6 +232,27 @@ async def construir_respuesta_con_extraccion(
         else "Aquí tienes el documento solicitado:"
     )
     return intro + "\n\n" + "\n\n".join(partes)
+
+
+@router.get("/descargar/{tipo}/{filename}")
+async def descargar(tipo: str, filename: str):
+    """
+    Sirve un PDF generado con el NOMBRE OFICIAL de descarga.
+
+    El archivo en disco tiene un nombre único interno, pero el navegador lo
+    descargará como 'FO-IN-17 PLAN DE ACCION GRUPOS INV V1.pdf' (o FO-IN-13)
+    gracias al Content-Disposition que fija FileResponse(filename=...).
+    """
+    nombre_disco = Path(filename).name  # evita path traversal
+    ruta = GENERADOS_DIR / nombre_disco
+    if not ruta.exists():
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    nombre_descarga = NOMBRES_OFICIALES.get(tipo, nombre_disco)
+    return FileResponse(
+        str(ruta),
+        media_type="application/pdf",
+        filename=nombre_descarga,
+    )
 
 
 @router.post("/chat")
@@ -194,7 +281,8 @@ async def chat(data: Message):
                 sesiones_activas[session_id]["docente"] = docente
                 sesiones_activas[session_id]["paso"] = "autenticado"
                 pdfs = estado["pdfs_solicitados"]
-                respuesta_docs = await construir_respuesta_con_extraccion(pdfs, docente)
+                docente_obj = estado.get("docente_solicitado")
+                respuesta_docs = await construir_respuesta_con_extraccion(pdfs, docente, docente_obj)
                 return {
                     "reply": f"✅ Bienvenido/a, **{docente['nombre']}**. Acceso verificado.\n\n"
                              + respuesta_docs
@@ -218,14 +306,18 @@ async def chat(data: Message):
     pdfs_solicitados = detectar_pdf_solicitado(mensaje, data.history)
 
     if pdfs_solicitados:
+        # Detectar si se pide un docente específico (Ana, Pardo, Puerto…)
+        docente_solicitado = await asyncio.to_thread(detectar_docente_solicitado, mensaje)
         if autenticado:
             # Ya está autenticado, entrega directamente + extracción web
-            return {"reply": await construir_respuesta_con_extraccion(pdfs_solicitados, estado["docente"])}
+            return {"reply": await construir_respuesta_con_extraccion(
+                pdfs_solicitados, estado["docente"], docente_solicitado)}
         else:
             # Iniciar flujo de autenticación
             sesiones_activas[session_id] = {
                 "paso": "esperando_usuario",
                 "pdfs_solicitados": pdfs_solicitados,
+                "docente_solicitado": docente_solicitado,
                 "usuario_ingresado": None,
                 "autenticado": False,
                 "docente": None,

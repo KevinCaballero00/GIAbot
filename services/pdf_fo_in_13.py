@@ -26,6 +26,10 @@ from reportlab.platypus import (
 )
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "static" / "generados"
+LOGO_PATH = Path(__file__).resolve().parent.parent / "static" / "docs" / "Logo UFPS.png"
+
+# Director del grupo GIA (constante del formato oficial, no del docente solicitado)
+DIRECTOR_GRUPO = "Fredy Humberto Vera Rivera"
 
 # ── Colores del formulario oficial ───────────────────────────────────────────
 _ROJO = colors.HexColor("#C00000")
@@ -117,6 +121,23 @@ def _split_actividades(desc: str | None, max_chars: int = 180, max_items: int = 
     return resultado[:max_items] if resultado else [""]
 
 
+def _normalizar_actividades(actividades, max_chars: int = 180, max_items: int = 5) -> list[str]:
+    """Normaliza la lista de actividades ya estructurada. Acepta lista o string."""
+    if isinstance(actividades, str):
+        return _split_actividades(actividades, max_chars, max_items)
+    if not actividades:
+        return [""]
+    resultado: list[str] = []
+    for act in actividades:
+        a = str(act).strip()
+        if not a:
+            continue
+        if len(a) > max_chars:
+            a = a[:max_chars].rsplit(" ", 1)[0] + "..."
+        resultado.append(a)
+    return resultado[:max_items] if resultado else [""]
+
+
 def _periodo_a_semestre_anio(periodo: str) -> tuple[str, str]:
     """'2026-1' → ('1', '2026')"""
     m = re.match(r"(\d{4})[-–/]([12])", periodo or "")
@@ -172,13 +193,27 @@ class _EncabezadoCanvas(rl_canvas.Canvas):
 
         # rectángulo columna logo
         self.rect(x0, top - h_hdr, col1, h_hdr)
-        self.setFont("Helvetica-Bold", 7)
-        self.setFillColor(_NEGRO)
-        self.drawCentredString(x0 + col1 / 2, top - 0.5 * cm, "UF")
-        self.drawCentredString(x0 + col1 / 2, top - 0.9 * cm, "PS")
-        self.setFont("Helvetica", 5.5)
-        self.drawCentredString(x0 + col1 / 2, top - 1.2 * cm, "Universidad Francisco")
-        self.drawCentredString(x0 + col1 / 2, top - 1.45 * cm, "de Paula Santander")
+        logo_ok = False
+        if LOGO_PATH.exists():
+            try:
+                pad = 0.2 * cm
+                self.drawImage(
+                    str(LOGO_PATH),
+                    x0 + pad, top - h_hdr + pad,
+                    width=col1 - 2 * pad, height=h_hdr - 2 * pad,
+                    preserveAspectRatio=True, mask="auto",
+                )
+                logo_ok = True
+            except Exception:
+                logo_ok = False
+        if not logo_ok:
+            self.setFont("Helvetica-Bold", 7)
+            self.setFillColor(_NEGRO)
+            self.drawCentredString(x0 + col1 / 2, top - 0.5 * cm, "UF")
+            self.drawCentredString(x0 + col1 / 2, top - 0.9 * cm, "PS")
+            self.setFont("Helvetica", 5.5)
+            self.drawCentredString(x0 + col1 / 2, top - 1.2 * cm, "Universidad Francisco")
+            self.drawCentredString(x0 + col1 / 2, top - 1.45 * cm, "de Paula Santander")
 
         # Columna central: INVESTIGACIÓN + título rojo
         x_mid = x0 + col1
@@ -286,7 +321,8 @@ def _p(txt: str, style=None) -> Paragraph:
 
 def _bloque_info(docente_info: dict, periodo: str) -> Table:
     semestre, anio = _periodo_a_semestre_anio(periodo)
-    nombre = _v(docente_info.get("nombre")) if docente_info else ""
+    # El DIRECTOR del grupo es constante del formato, no el docente solicitado
+    nombre = DIRECTOR_GRUPO
     s1 = "[X]" if semestre == "1" else "[ ]"
     s2 = "[X]" if semestre == "2" else "[ ]"
 
@@ -361,13 +397,13 @@ def _seccion_proyectos(proyectos: list[dict]) -> list:
     spans: list[tuple] = []
     row_idx = 1  # empezamos en fila 1 (después del header)
 
-    proyectos_validos = [p for p in proyectos if p.get("proyecto") and not p.get("error")]
+    proyectos_validos = [p for p in proyectos if p.get("proyecto") and not p.get("error")][:6]
     if not proyectos_validos:
         data.append([_p("Sin proyectos identificados en las fuentes consultadas."), "", ""])
         spans.append(("SPAN", (0, 1), (2, 1)))
     else:
         for proj in proyectos_validos:
-            actividades = _split_actividades(proj.get("descripcion"))
+            actividades = _normalizar_actividades(proj.get("actividades"))
             n = max(len(actividades), 1)
             nombre_raw = _v(proj.get("proyecto")) or ""
             nombre_truncado = nombre_raw[:200] + ("..." if len(nombre_raw) > 200 else "")
@@ -541,7 +577,7 @@ def _seccion_productos(proyectos: list[dict]) -> list:
                  _p(""), _p("")])
     for proj in articulos[:3]:
         rows.append([_p(""), _p(_v(proj.get("proyecto"))),
-                     _p(_v(proj.get("docente") or "")), _p("")])
+                     _p(_v(proj.get("responsable") or "")), _p("")])
 
     # Artículo publicado
     rows.append([_p("Artículo publicado o remitido revista científica", _LABEL),
@@ -608,7 +644,8 @@ def _seccion_firma(docente_info: dict) -> list:
     ))
     elementos.append(Spacer(1, 0.4 * cm))
 
-    nombre = _v(docente_info.get("nombre")) if docente_info else "Fredy Humberto Vera Rivera"
+    # Quien firma como Director del Grupo es constante del formato
+    nombre = DIRECTOR_GRUPO
 
     data = [
         [_p("ELABORADO POR", _HEADER_NEGRO), _p("REVISADO POR", _HEADER_NEGRO)],
@@ -644,13 +681,14 @@ def generar_pdf_fo_in_13_plantilla(resultado: dict) -> str:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     docente_info = resultado.get("docente") or {}
-    nombre_docente = _v(docente_info.get("nombre")) or "docente"
-    nombre_slug = re.sub(r"[^\w]", "_", nombre_docente)[:25].strip("_")
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nombre_archivo = f"FO-IN-13_{nombre_slug}_{ts}.pdf"
-    ruta = OUTPUT_DIR / nombre_archivo
-
+    # Archivo único y estable (responsable + periodo); el nombre oficial de
+    # descarga lo fija la ruta /descargar vía Content-Disposition.
+    responsable_doc = _v(resultado.get("responsable")) or _v(docente_info.get("nombre")) or "docente"
+    nombre_slug = re.sub(r"[^\w]", "_", responsable_doc)[:25].strip("_")
     periodo = _v(resultado.get("periodo")) or "2026-1"
+    periodo_slug = re.sub(r"[^\w]", "_", periodo)
+    nombre_archivo = f"FO-IN-13_{nombre_slug}_{periodo_slug}.pdf"
+    ruta = OUTPUT_DIR / nombre_archivo
     fecha_ext = resultado.get("fecha_extraccion", "")
     fecha_doc = datetime.now().strftime("%d/%m/%Y")
     proyectos = resultado.get("proyectos", [])

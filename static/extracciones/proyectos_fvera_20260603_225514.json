@@ -1,0 +1,55 @@
+{
+  "docente": {
+    "id": 1,
+    "nombre": "Fredy Vera Rivera",
+    "usuario": "fvera"
+  },
+  "responsable": "Ana Gissele Gutiérrez Buitrago, Ph.D. (c)",
+  "periodo": "2026-1",
+  "proyectos": [
+    {
+      "linea": "Analítica de Datos",
+      "proyecto": "Identificación de patrones de deserción estudiantil, pérdida de materias y repetición usando técnicas de analítica de datos",
+      "objetivo": "Identificar patrones de deserción estudiantil, pérdida de materias y repetición usando técnicas de analítica de datos.",
+      "actividades": [],
+      "responsable": "Ana Gissele Gutiérrez Buitrago, Ph.D. (c)",
+      "producto": ""
+    }
+  ],
+  "_proyectos_crudos": [
+    {
+      "fuente": "GIA Web – /proyectos/",
+      "docente": null,
+      "proyecto": "Proyectos de GIA",
+      "periodo": null,
+      "descripcion": null,
+      "enlace_origen": "https://gia.ufps.edu.co/proyectos/",
+      "fecha_extraccion": "2026-06-03T22:55:14.463084"
+    },
+    {
+      "fuente": "GIA Web – /proyectos/",
+      "docente": null,
+      "proyecto": "Transformación digital de las Mypimes",
+      "periodo": null,
+      "descripcion": "Modelo ágil para el diagnóstico y formulación de propuestas de Transformación Digital en las Mypimes de la Ciudad de\n                Cúcuta. Responsable: Eduard Gilberto Puerto Cuadros Crear una propuesta de Maestría en Transformación digital. Responsable: Milton Jesús Vera Contreras Validar y transferir conocimiento del modelo inteligente para identificar y especificar microservicios\n                 a empresas de desarrollo de software. Responsable: Fredy Humberto Vera Rivera. Analizar las diferentes estrategias de deuda técnica usadas en proyecto de software en Colombia. Responsable: Boris Rainiero Pérez Gutierrez. Identificar patrones de deserción estudiantil, pérdida materias y repetición usando técnicas de analítica de datos. Responsable: Ana Gissel Gutierrez Buitrago. Caracterizar l",
+      "enlace_origen": "https://gia.ufps.edu.co/proyectos/",
+      "fecha_extraccion": "2026-06-03T22:55:14.463084"
+    },
+    {
+      "fuente": "CvLAC (Minciencias)",
+      "docente": "Ana Gissele Gutiérrez Buitrago, Ph.D. (c)",
+      "proyecto": "PLAN DE GESTIÓN DEL PROYECTO: DESARROLLO DEL MÓDULO DE APLICACIÓN DE CONVENIOS DE LA UNIVERSIDAD FRANCISCO DE PAULA SANTANDER",
+      "periodo": "2011",
+      "descripcion": "PLAN DE GESTIÓN DEL PROYECTO: DESARROLLO DEL MÓDULO DE APLICACIÓN DE CONVENIOS DE LA UNIVERSIDAD FRANCISCO DE PAULA SANTANDER\nEspecialización\nUNIVERSIDAD MILITAR NUEVA GRANADA\nFinanzas y Administración Pública\nEnerode2010 - Enerode 2011\nPregrado/Universitario\nUNIVERSIDAD FRANCISCO DE PAULA SANTANDER\nINGENIERIA DE SISTEMAS\nFebrerode2002 - Diciembrede 2007\nRediseño de la Red (LAN) de la sede principal de la empresa Odontocucuta, S.A. y su interconexión a través de una Red (WAN) con las sucursales ubicadas en los barrios de la Libertad y Atalaya de la ciudad de Cúcuta y los municipios de los Patios y Pamplona del Departamento Norte de Santander\nFormación Complementaria\nCursos de corta duración\nUniversidad Internacional de la Rioja\nEspecialización en Gerencia de Proyectos\nMayode2018 - Mayode 2018\nExperiencia profesional\nUNIVERSIDAD FRANCISCO DE PAULA SANTANDER\nDedicación:\n10 horas Semanales\r\n                        Agosto de 2013            \r\n                         de Actual\nUNIVERSIDAD FRANCISCO DE PAULA SANTANDER\nDedicación:\n48 horas Semanales\r\n                        Abril de 2013            \r\n                         de Actual\nCorporación Universitaria Minuto de Dios\nDedicación:\n",
+      "enlace_origen": "https://scienti.minciencias.gov.co/cvlac/visualizador/generarCurriculoCv.do?cod_rh=0001352278",
+      "fecha_extraccion": "2026-06-03T22:55:15.072986"
+    }
+  ],
+  "fuentes_consultadas": [
+    "GIA Web – /proyectos/",
+    "CvLAC de Ana Gissele Gutiérrez Buitrago, Ph.D. (c)"
+  ],
+  "errores": [],
+  "fecha_extraccion": "2026-06-03T22:55:14.463050",
+  "duracion_segundos": 10.58
+}

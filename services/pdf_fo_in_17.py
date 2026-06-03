@@ -24,6 +24,10 @@ from reportlab.platypus import (
 )
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "static" / "generados"
+LOGO_PATH = Path(__file__).resolve().parent.parent / "static" / "docs" / "Logo UFPS.png"
+
+# Director del grupo GIA (constante del formato oficial, no del docente solicitado)
+DIRECTOR_GRUPO = "Fredy Humberto Vera Rivera"
 
 _ROJO = colors.HexColor("#C00000")
 _NARANJA = colors.HexColor("#F4B942")
@@ -95,6 +99,24 @@ def _split_actividades(desc: str | None, max_chars: int = 150, max_items: int = 
     return resultado[:max_items] if resultado else [""]
 
 
+def _normalizar_actividades(actividades, max_chars: int = 150, max_items: int = 5) -> list[str]:
+    """Normaliza la lista de actividades ya estructurada (recorta largo y cantidad).
+    Acepta lista o string (fallback)."""
+    if isinstance(actividades, str):
+        return _split_actividades(actividades, max_chars, max_items)
+    if not actividades:
+        return [""]
+    resultado: list[str] = []
+    for act in actividades:
+        a = str(act).strip()
+        if not a:
+            continue
+        if len(a) > max_chars:
+            a = a[:max_chars].rsplit(" ", 1)[0] + "..."
+        resultado.append(a)
+    return resultado[:max_items] if resultado else [""]
+
+
 # ── Canvas con encabezado ─────────────────────────────────────────────────────
 
 class _EncabezadoCanvas(rl_canvas.Canvas):
@@ -135,13 +157,27 @@ class _EncabezadoCanvas(rl_canvas.Canvas):
         self.setLineWidth(0.5)
 
         self.rect(x0, top - h_hdr, col1, h_hdr)
-        self.setFont("Helvetica-Bold", 7)
-        self.setFillColor(_NEGRO)
-        self.drawCentredString(x0 + col1 / 2, top - 0.5 * cm, "UF")
-        self.drawCentredString(x0 + col1 / 2, top - 0.9 * cm, "PS")
-        self.setFont("Helvetica", 5.5)
-        self.drawCentredString(x0 + col1 / 2, top - 1.2 * cm, "Universidad Francisco")
-        self.drawCentredString(x0 + col1 / 2, top - 1.45 * cm, "de Paula Santander")
+        logo_ok = False
+        if LOGO_PATH.exists():
+            try:
+                pad = 0.2 * cm
+                self.drawImage(
+                    str(LOGO_PATH),
+                    x0 + pad, top - h_hdr + pad,
+                    width=col1 - 2 * pad, height=h_hdr - 2 * pad,
+                    preserveAspectRatio=True, mask="auto",
+                )
+                logo_ok = True
+            except Exception:
+                logo_ok = False
+        if not logo_ok:
+            self.setFont("Helvetica-Bold", 7)
+            self.setFillColor(_NEGRO)
+            self.drawCentredString(x0 + col1 / 2, top - 0.5 * cm, "UF")
+            self.drawCentredString(x0 + col1 / 2, top - 0.9 * cm, "PS")
+            self.setFont("Helvetica", 5.5)
+            self.drawCentredString(x0 + col1 / 2, top - 1.2 * cm, "Universidad Francisco")
+            self.drawCentredString(x0 + col1 / 2, top - 1.45 * cm, "de Paula Santander")
 
         x_mid = x0 + col1
         self.rect(x_mid, top - h_hdr, col_mid, h_hdr)
@@ -231,7 +267,8 @@ def _fila_seccion_roja(texto: str) -> Table:
 
 def _bloque_info(docente_info: dict, periodo: str) -> Table:
     semestre, anio = _periodo_a_semestre_anio(periodo)
-    nombre = _v(docente_info.get("nombre")) if docente_info else "Fredy Humberto Vera Rivera"
+    # El DIRECTOR del grupo es constante del formato, no el docente solicitado
+    nombre = DIRECTOR_GRUPO
     W = letter[0] - 3.0 * cm
 
     sub1 = Table([
@@ -286,11 +323,11 @@ def _bloque_linea(num: int, proyecto: dict) -> list:
 
     elementos.append(_fila_seccion_roja(f"{num}. LINEA DE INVESTIGACIÓN"))
 
-    linea = _v(proyecto.get("fuente")) or "Sistemas Inteligentes Aplicados"
+    linea = _v(proyecto.get("linea")) or "Sistemas Inteligentes Aplicados"
     nombre_proy_raw = _v(proyecto.get("proyecto")) or ""
-    # Truncar nombres muy largos (CvLAC a veces pone el resumen como título)
+    # Truncar nombres muy largos por seguridad
     nombre_proy = nombre_proy_raw[:200] + ("..." if len(nombre_proy_raw) > 200 else "")
-    responsable = _v(proyecto.get("docente")) or ""
+    responsable = _v(proyecto.get("responsable")) or ""
 
     info_data = [
         [_p("Línea de Investigación", _LABEL), _p(linea, _VALOR)],
@@ -306,10 +343,12 @@ def _bloque_linea(num: int, proyecto: dict) -> list:
     # Usamos UNA sola fila de datos (sin SPAN) para evitar rows gigantes.
     # Las actividades se unen con saltos de línea dentro de la celda.
     cw_obj = [W * 0.28, W * 0.36, W * 0.16, W * 0.20]
-    actividades = _split_actividades(proyecto.get("descripcion"))
+    actividades = _normalizar_actividades(proyecto.get("actividades"))
     actvs_html = "<br/>".join(_e(a) for a in actividades if a)
-    # Truncar objetivo a 180 chars para que la celda quepa en la página
-    objetivo_celda = nombre_proy[:180] + ("..." if len(nombre_proy) > 180 else "")
+    # El objetivo viene ya estructurado; se acota a 180 chars para que la celda quepa
+    objetivo_raw = _v(proyecto.get("objetivo")) or nombre_proy
+    objetivo_celda = objetivo_raw[:180] + ("..." if len(objetivo_raw) > 180 else "")
+    producto = _v(proyecto.get("producto")) or ""
 
     header_row = [
         _p("Objetivo", _HEADER_NEGRO),
@@ -321,7 +360,7 @@ def _bloque_linea(num: int, proyecto: dict) -> list:
         _p(objetivo_celda),
         Paragraph(actvs_html, _NORMAL),
         _p(responsable),
-        _p(""),
+        _p(producto),
     ]
 
     t_obj = Table([header_row, data_row], colWidths=cw_obj)
@@ -450,7 +489,8 @@ def _seccion_otras() -> list:
 
 def _seccion_firma(docente_info: dict) -> list:
     W = letter[0] - 3.0 * cm
-    nombre = _v(docente_info.get("nombre")) if docente_info else "Fredy Humberto Vera Rivera"
+    # Quien firma como Director del Grupo es constante del formato
+    nombre = DIRECTOR_GRUPO
     elementos = []
     elementos.append(Spacer(1, 0.4 * cm))
 
@@ -486,16 +526,19 @@ def generar_pdf_fo_in_17_plantilla(resultado: dict) -> str:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     docente_info = resultado.get("docente") or {}
-    nombre_docente = _v(docente_info.get("nombre")) or "docente"
-    nombre_slug = re.sub(r"[^\w]", "_", nombre_docente)[:25].strip("_")
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nombre_archivo = f"FO-IN-17_{nombre_slug}_{ts}.pdf"
+    # El archivo en disco es único y estable (responsable + periodo); el nombre
+    # oficial de descarga lo fija la ruta /descargar vía Content-Disposition.
+    responsable_doc = _v(resultado.get("responsable")) or _v(docente_info.get("nombre")) or "docente"
+    nombre_slug = re.sub(r"[^\w]", "_", responsable_doc)[:25].strip("_")
+    periodo = _v(resultado.get("periodo")) or "2026-1"
+    periodo_slug = re.sub(r"[^\w]", "_", periodo)
+    nombre_archivo = f"FO-IN-17_{nombre_slug}_{periodo_slug}.pdf"
     ruta = OUTPUT_DIR / nombre_archivo
 
-    periodo = _v(resultado.get("periodo")) or "2026-1"
     fecha_doc = datetime.now().strftime("%d/%m/%Y")
     proyectos = resultado.get("proyectos", [])
-    proyectos_validos = [p for p in proyectos if p.get("proyecto") and not p.get("error")]
+    # Máximo 6 líneas de investigación (cap defensivo)
+    proyectos_validos = [p for p in proyectos if p.get("proyecto") and not p.get("error")][:6]
 
     W, H = letter
     margen_lat = 1.5 * cm
