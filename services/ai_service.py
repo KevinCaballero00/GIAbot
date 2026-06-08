@@ -112,18 +112,14 @@ def generar_respuesta(mensaje: str, historial: list, session_id: str = "") -> st
     ]
 
     try:
-        response = client.models.generate_content(
+        chat = client.chats.create(
             model="models/gemini-2.5-flash",
             config=genai_types.GenerateContentConfig(
                 system_instruction=system_prompt,
             ),
-            contents=historial_formateado + [
-                genai_types.Content(
-                    role="user",
-                    parts=[genai_types.Part(text=mensaje)],
-                )
-            ],
+            history=historial_formateado,
         )
+        response = chat.send_message(mensaje)
         return response.text
     except Exception as exc:
         logger.error("Gemini: error generando respuesta: %s", exc)

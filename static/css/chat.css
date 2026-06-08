@@ -146,8 +146,8 @@ footer ul li a:hover { color: var(--acento); }
 
 /* VENTANA CHAT */
 #chat-window {
-  position: fixed; bottom: 100px; right: 28px; z-index: 998;
-  width: 380px; height: 560px;
+  position: fixed; bottom: 96px; right: 24px; z-index: 998;
+  width: 340px; height: 460px;
   background: white; border-radius: 20px;
   box-shadow: 0 20px 60px rgba(0,0,0,0.2);
   display: flex; flex-direction: column; overflow: hidden;
