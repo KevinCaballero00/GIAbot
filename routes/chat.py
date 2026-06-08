@@ -4,11 +4,13 @@ Router principal de chat de GIAbot.
 Maneja en orden de prioridad:
   1. Flujos de autenticación en curso (usuario/contraseña).
   2. Flujo de registro conversacional de proyectos en curso.
-  3. Flujo de completado de PDF en curso.
-  4. Detección de solicitud de PDFs (FO-IN-13 / FO-IN-17).
-  5. Detección de intención de registrar proyecto.
-  6. Detección de intención de completar PDF.
-  7. Chat normal delegado al LLM.
+  3. Confirmación del FO-IN-17 fuente antes de generar el FO-IN-13.
+  4. Flujo de % de cumplimiento del FO-IN-13 en curso.
+  5. Flujo de completado de PDF en curso.
+  6. Detección de solicitud de PDFs (FO-IN-13 / FO-IN-17).
+  7. Detección de intención de registrar proyecto.
+  8. Detección de intención de completar PDF.
+  9. Chat normal delegado al LLM.
 
 Todas las interacciones quedan registradas en conversation_logs.
 """
@@ -19,6 +21,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -132,6 +135,47 @@ VERBOS_SOLICITUD = [
     "muestrame", "pásamelo", "pasamelo", "ahora", "también", "tambien",
     "completar", "rellenar", "llenar", "completa", "rellena", "llena  ",
 ]
+
+# ── Palabras de confirmación / negación ───────────────────────────────────────
+
+_AFIRMACIONES = [
+    "si", "sí", "correcto", "prosigue", "continua", "continúa", "continuar",
+    "adelante", "procede", "proceder", "dale", "ok", "okay", "listo", "exacto",
+    "afirmativo", "claro", "por favor", "hazlo", "generalo", "genéralo",
+    "generar", "acepto", "confirmado", "confirmo", "seguir", "sigue",
+]
+
+_NEGACIONES = [
+    "no", "incorrecto", "negativo", "cancela", "cancelar", "detente",
+    "espera", "no sigas", "no continues", "no continúes", "detener",
+    "equivocado", "erróneo", "erroneo", "para", "parar",
+]
+
+
+def _es_afirmacion(mensaje: str) -> bool:
+    msg = mensaje.lower().strip()
+    return any(re.search(rf"\b{re.escape(a)}\b", msg) for a in _AFIRMACIONES)
+
+
+def _es_negacion(mensaje: str) -> bool:
+    msg = mensaje.lower().strip()
+    return any(re.search(rf"\b{re.escape(n)}\b", msg) for n in _NEGACIONES)
+
+
+def _formatear_fecha_display(fecha_iso: str | None) -> str:
+    """Convierte un ISO datetime a 'DD de mes de YYYY' en español."""
+    if not fecha_iso:
+        return "fecha desconocida"
+    meses = {
+        1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
+        5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
+        9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
+    }
+    try:
+        dt = datetime.fromisoformat(fecha_iso)
+        return f"{dt.day} de {meses[dt.month]} de {dt.year}"
+    except Exception:
+        return fecha_iso[:10] if len(fecha_iso) >= 10 else fecha_iso
 
 
 # ── Detectores de intención ───────────────────────────────────────────────────
@@ -272,7 +316,7 @@ async def _bloque_fo_in_17(
         )
         if advertencia:
             bloque += f"\n⚠️ {advertencia}"
-        _guardar_reporte_asinc(docente, "17", semestre_actual, nombre_17, fuentes)
+        _guardar_reporte_asinc(docente, "17", semestre_actual, nombre_17, fuentes, docente_objetivo)
         return bloque, fuentes
     except Exception as exc:
         return (
@@ -289,6 +333,7 @@ async def _bloque_fo_in_13(
     semestre_actual: str,
     datos_fuente: dict | None = None,
     sem_referencia: str | None = None,
+    responsable_base: str | None = None,
     cumplimientos: dict | None = None,
 ) -> str:
     """Genera el FO-IN-13 (con % opcional) y devuelve el bloque markdown."""
@@ -297,15 +342,19 @@ async def _bloque_fo_in_13(
             lambda: generar_fo_in_13(
                 docente, semestre_actual, docente_objetivo,
                 datos_fuente=datos_fuente, sem_referencia=sem_referencia,
+                responsable_base=responsable_base,
                 cumplimientos=cumplimientos,
             )
         )
         nombre_13 = resultado_13["pdf_nombre"]
         sem_ref = resultado_13["semestre_referencia"]
-        _guardar_reporte_asinc(docente, "13", semestre_actual, nombre_13, [])
+        responsable_base = resultado_13.get("responsable_base", "")
+        _guardar_reporte_asinc(docente, "13", semestre_actual, nombre_13, [],
+                               docente_objetivo or ({"nombre": responsable_base} if responsable_base else None))
+        nota_fuente = f" — basado en datos de **{responsable_base}**" if responsable_base else ""
         return (
             "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
-            f"Generado a partir del Plan de Acción (FO-IN-17) del semestre {sem_ref}."
+            f"Generado a partir del FO-IN-17 del semestre {sem_ref}{nota_fuente}."
             f"{_nota_objetivo(docente_objetivo)}\n"
             f"👉 [Descargar informe (PDF)](/descargar/13/{nombre_13})"
         )
@@ -335,10 +384,10 @@ async def iniciar_entrega_pdfs(
     Orquesta la entrega de los PDFs solicitados.
 
     - FO-IN-17 se genera y entrega de inmediato.
-    - FO-IN-13: si el FO-IN-17 de referencia tiene proyectos, NO se genera aún;
-      se inicia el flujo conversacional de % de cumplimiento (estado
-      `recolectando_cumplimiento`) preguntando proyecto por proyecto. Si no hay
-      proyectos, se genera directo (sin preguntas).
+    - FO-IN-13: primero muestra los metadatos del FO-IN-17 que se usará como
+      fuente y pide confirmación (estado `confirmando_fo_in_13`). Cuando el
+      docente confirma, `_procesar_confirmacion_fo_in_13` inicia el flujo de
+      % de cumplimiento o genera directo si no hay proyectos.
 
     Retorna (texto_respuesta, fuentes).
     """
@@ -359,44 +408,48 @@ async def iniciar_entrega_pdfs(
             )
             datos_fuente = fuente["datos_fuente"]
             sem_ref = fuente["sem_referencia"]
-            proyectos = proyectos_validos(datos_fuente.get("proyectos", []))
+            responsable_base = fuente.get("responsable_base", "")
+            fo_in_17_fecha = fuente.get("fo_in_17_fecha", "")
+            fo_in_17_generado_por = fuente.get("fo_in_17_generado_por", "")
         except Exception as exc:
             partes.append(
                 "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
                 f"⚠️ No se pudo preparar el informe: {exc}"
             )
-            proyectos = []
             datos_fuente = None
             sem_ref = None
+            responsable_base = ""
+            fo_in_17_fecha = ""
+            fo_in_17_generado_por = ""
 
-        if datos_fuente is not None and proyectos:
-            # Iniciar flujo conversacional de % de cumplimiento.
-            estado = sesiones_activas.setdefault(session_id, {})
-            estado.update({
-                "paso": "recolectando_cumplimiento",
+        if datos_fuente is not None:
+            # Guardar datos en sesión y mostrar confirmación antes de continuar.
+            estado_ses = sesiones_activas.setdefault(session_id, {})
+            estado_ses.update({
+                "paso": "confirmando_fo_in_13",
                 "autenticado": True,
                 "docente": docente,
-                "cumpl_proyectos": proyectos,
-                "cumpl_idx": 0,
-                "cumpl_valores": {},
-                "cumpl_datos_fuente": datos_fuente,
-                "cumpl_sem_referencia": sem_ref,
-                "cumpl_docente_objetivo": docente_objetivo,
+                "confirmacion_datos_fuente": datos_fuente,
+                "confirmacion_sem_referencia": sem_ref,
+                "confirmacion_responsable_base": responsable_base,
+                "confirmacion_docente_objetivo": docente_objetivo,
             })
-            intro_13 = (
-                "Para generar el **FO-IN-13** necesito el porcentaje de cumplimiento "
-                f"de cada uno de los {len(proyectos)} proyectos del Plan de Acción "
-                f"(FO-IN-17) del semestre {sem_ref}.\n\n"
-                + _pregunta_cumplimiento(proyectos[0])
+            lineas_info: list[str] = []
+            if responsable_base:
+                lineas_info.append(f"📋 **Responsable:** {responsable_base}")
+            lineas_info.append(f"📚 **Semestre:** {sem_ref}")
+            if fo_in_17_fecha:
+                lineas_info.append(f"📅 **Fecha de generación:** {_formatear_fecha_display(fo_in_17_fecha)}")
+            if fo_in_17_generado_por:
+                lineas_info.append(f"👤 **Generado por:** {fo_in_17_generado_por}")
+            msg_confirmacion = (
+                "El siguiente **FO-IN-13 Informe de Gestión de Grupos de Investigación** "
+                "se realizará a partir del FO-IN-17:\n\n"
+                + "\n".join(lineas_info)
+                + "\n\n¿Desea continuar?"
             )
-            partes.append(intro_13)
+            partes.append(msg_confirmacion)
             inicio_preguntas = True
-        elif datos_fuente is not None:
-            # Sin proyectos → generar directo, sin preguntas.
-            partes.append(await _bloque_fo_in_13(
-                docente, docente_objetivo, semestre_actual,
-                datos_fuente=datos_fuente, sem_referencia=sem_ref, cumplimientos={},
-            ))
 
     if inicio_preguntas:
         # Aún no se entrega el FO-IN-13; se inician las preguntas de %.
@@ -408,6 +461,88 @@ async def iniciar_entrega_pdfs(
             else "Aquí tienes el documento solicitado:"
         )
     return (intro + "\n\n" + "\n\n".join(partes)).strip(), fuentes
+
+
+async def _continuar_generacion_fo_in_13(
+    session_id: str,
+    docente: dict | None,
+    docente_objetivo: dict | None,
+    datos_fuente: dict,
+    sem_ref: str,
+    responsable_base: str,
+    semestre_actual: str,
+) -> str:
+    """
+    Inicia el flujo de % de cumplimiento si hay proyectos, o genera el
+    FO-IN-13 directamente si no los hay. Se llama tras la confirmación del usuario.
+    """
+    proyectos = proyectos_validos(datos_fuente.get("proyectos", []))
+
+    if proyectos:
+        estado = sesiones_activas.setdefault(session_id, {})
+        estado.update({
+            "paso": "recolectando_cumplimiento",
+            "autenticado": True,
+            "docente": docente,
+            "cumpl_proyectos": proyectos,
+            "cumpl_idx": 0,
+            "cumpl_valores": {},
+            "cumpl_datos_fuente": datos_fuente,
+            "cumpl_sem_referencia": sem_ref,
+            "cumpl_responsable_base": responsable_base,
+            "cumpl_docente_objetivo": docente_objetivo,
+        })
+        return (
+            f"Para generar el **FO-IN-13** necesito el porcentaje de cumplimiento "
+            f"de cada uno de los {len(proyectos)} proyectos del Plan de Acción "
+            f"(FO-IN-17) del semestre {sem_ref}.\n\n"
+            + _pregunta_cumplimiento(proyectos[0])
+        )
+
+    return await _bloque_fo_in_13(
+        docente, docente_objetivo, semestre_actual,
+        datos_fuente=datos_fuente, sem_referencia=sem_ref,
+        responsable_base=responsable_base, cumplimientos={},
+    )
+
+
+async def _procesar_confirmacion_fo_in_13(session_id: str, mensaje: str) -> str:
+    """
+    Procesa la respuesta del docente al mensaje de confirmación del FO-IN-17 fuente.
+    Afirmación → inicia la generación. Negación → cancela.
+    """
+    estado = sesiones_activas[session_id]
+    semestre_actual, _, _ = calcular_periodo()
+
+    if _es_negacion(mensaje) and not _es_afirmacion(mensaje):
+        estado["paso"] = "autenticado"
+        for clave in (
+            "confirmacion_datos_fuente", "confirmacion_sem_referencia",
+            "confirmacion_responsable_base", "confirmacion_docente_objetivo",
+        ):
+            estado.pop(clave, None)
+        return (
+            "❌ Generación del **FO-IN-13** cancelada. "
+            "Si deseas usar otro FO-IN-17 como base, primero genera ese documento y luego pide el FO-IN-13."
+        )
+
+    if _es_afirmacion(mensaje):
+        datos_fuente = estado.pop("confirmacion_datos_fuente", {})
+        sem_ref = estado.pop("confirmacion_sem_referencia", "")
+        responsable_base = estado.pop("confirmacion_responsable_base", "")
+        docente_objetivo = estado.pop("confirmacion_docente_objetivo", None)
+        docente = estado.get("docente")
+        estado["paso"] = "autenticado"
+
+        return await _continuar_generacion_fo_in_13(
+            session_id, docente, docente_objetivo,
+            datos_fuente, sem_ref, responsable_base, semestre_actual,
+        )
+
+    return (
+        "Por favor responde **sí** para continuar con el FO-IN-17 mostrado "
+        "o **no** para cancelar."
+    )
 
 
 async def _procesar_cumplimiento(session_id: str, mensaje: str) -> str:
@@ -443,6 +578,7 @@ async def _procesar_cumplimiento(session_id: str, mensaje: str) -> str:
         semestre_actual,
         datos_fuente=estado.get("cumpl_datos_fuente"),
         sem_referencia=estado.get("cumpl_sem_referencia"),
+        responsable_base=estado.get("cumpl_responsable_base"),
         cumplimientos=estado.get("cumpl_valores", {}),
     )
 
@@ -450,25 +586,32 @@ async def _procesar_cumplimiento(session_id: str, mensaje: str) -> str:
     estado["paso"] = "autenticado"
     for clave in (
         "cumpl_proyectos", "cumpl_idx", "cumpl_valores",
-        "cumpl_datos_fuente", "cumpl_sem_referencia", "cumpl_docente_objetivo",
+        "cumpl_datos_fuente", "cumpl_sem_referencia", "cumpl_responsable_base",
+        "cumpl_docente_objetivo",
     ):
         estado.pop(clave, None)
 
     return "✅ ¡Listo! Generé tu informe con los porcentajes indicados.\n\n" + bloque
 
 
-def _guardar_reporte_asinc(docente, tipo, semestre, pdf_nombre, fuentes):
+def _guardar_reporte_asinc(docente, tipo, semestre, pdf_nombre, fuentes, docente_objetivo=None):
     """Guarda el registro del reporte generado sin bloquear la respuesta."""
     try:
         import json
         from services.rag_service import guardar_reporte
         docente_id = docente["id"] if docente else None
+        responsable_nombre = (
+            docente_objetivo["nombre"] if docente_objetivo
+            else (docente["nombre"] if docente else None)
+        )
         guardar_reporte(
             docente_id=docente_id,
             tipo=tipo,
             semestre=semestre,
             pdf_path=f"/static/generados/{pdf_nombre}",
             fuentes_usadas=json.dumps(fuentes, ensure_ascii=False),
+            responsable_nombre=responsable_nombre,
+            generado_por_docente_id=docente_id,
         )
     except Exception as exc:
         logger.debug("No se pudo guardar registro de reporte: %s", exc)
@@ -645,7 +788,13 @@ async def chat(data: Message):
             respuesta = await _procesar_registro_proyecto(session_id, mensaje)
             return {"reply": respuesta}
 
-        # ── 2b. Flujo de % de cumplimiento del FO-IN-13 en curso ────────────
+        # ── 2b. Confirmación del FO-IN-17 fuente antes de generar FO-IN-13 ──
+        if estado and estado.get("paso") == "confirmando_fo_in_13":
+            intencion = "solicitud_pdf_[13]"
+            respuesta = await _procesar_confirmacion_fo_in_13(session_id, mensaje)
+            return {"reply": respuesta}
+
+        # ── 2c. Flujo de % de cumplimiento del FO-IN-13 en curso ────────────
         if estado and estado.get("paso") == "recolectando_cumplimiento":
             intencion = "solicitud_pdf_[13]"
             respuesta = await _procesar_cumplimiento(session_id, mensaje)

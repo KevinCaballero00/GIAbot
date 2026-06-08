@@ -51,7 +51,7 @@ KW_PROYECTOS = {
 }
 
 PERIODO_RE = re.compile(r"\b(20\d{2}[-–/]\d{1,2}|20\d{2})\b")
-MAX_LINEAS_SECCION = 60
+MAX_LINEAS_SECCION = 100
 
 
 # ─────────────────────────── extractor CvLAC ─────────────────────────────────
@@ -82,6 +82,7 @@ def _extraer_proyectos_cvlac(nombre_docente: str, cvlac_url: str) -> list[dict]:
     secciones: list[list[str]] = []
     buf: list[str] = []
     capturando = False
+    consecutivos_vacios = 0
 
     for linea in lineas:
         ll = linea.lower().strip()
@@ -92,12 +93,21 @@ def _extraer_proyectos_cvlac(nombre_docente: str, cvlac_url: str) -> list[dict]:
                 secciones.append(buf)
             buf = [linea]
             capturando = True
+            consecutivos_vacios = 0
         elif capturando:
-            if not ll and len(buf) > 2:
-                secciones.append(buf)
-                buf = []
-                capturando = False
+            if not ll:
+                consecutivos_vacios += 1
+                # Cortar solo tras 3 líneas vacías seguidas (una sola línea vacía
+                # puede separar campos dentro del mismo proyecto en CvLAC)
+                if consecutivos_vacios >= 3 and len(buf) > 2:
+                    secciones.append(buf)
+                    buf = []
+                    capturando = False
+                    consecutivos_vacios = 0
+                else:
+                    buf.append(linea)
             else:
+                consecutivos_vacios = 0
                 buf.append(linea)
                 if len(buf) >= MAX_LINEAS_SECCION:
                     secciones.append(buf)
@@ -135,7 +145,7 @@ def _extraer_proyectos_cvlac(nombre_docente: str, cvlac_url: str) -> list[dict]:
             "docente": nombre_docente,
             "proyecto": titulo,
             "periodo": periodo,
-            "descripcion": texto_sec[:1200],
+            "descripcion": texto_sec[:2500],
             "enlace_origen": cvlac_url,
             "fecha_extraccion": fecha,
         })

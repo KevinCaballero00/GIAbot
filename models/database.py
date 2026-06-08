@@ -50,7 +50,9 @@ def init_db():
                 fecha_refresco TEXT,
                 estado TEXT DEFAULT 'pendiente',
                 error_log TEXT,
-                UNIQUE(docente_id, semestre),
+                responsable_nombre TEXT,
+                responsable_cvlac_url TEXT,
+                generado_por_docente_id INTEGER REFERENCES docentes(id),
                 FOREIGN KEY (docente_id) REFERENCES docentes(id)
             )
         """)
@@ -91,7 +93,9 @@ def init_db():
                 semestre TEXT NOT NULL,
                 pdf_path TEXT,
                 fuentes_usadas TEXT,
-                fecha_generacion TEXT NOT NULL
+                fecha_generacion TEXT NOT NULL,
+                responsable_nombre TEXT,
+                generado_por_docente_id INTEGER REFERENCES docentes(id)
             )
         """)
         cur.execute("""
@@ -108,6 +112,36 @@ def init_db():
                 fecha TEXT NOT NULL
             )
         """)
+        # Migraciones incrementales para BD existentes (idempotentes)
+        _migraciones = [
+            "ALTER TABLE fo_in_17 ADD COLUMN IF NOT EXISTS responsable_nombre TEXT",
+            "ALTER TABLE fo_in_17 ADD COLUMN IF NOT EXISTS responsable_cvlac_url TEXT",
+            "ALTER TABLE fo_in_17 ADD COLUMN IF NOT EXISTS generado_por_docente_id INTEGER REFERENCES docentes(id)",
+            "ALTER TABLE reportes_generados ADD COLUMN IF NOT EXISTS responsable_nombre TEXT",
+            "ALTER TABLE reportes_generados ADD COLUMN IF NOT EXISTS generado_por_docente_id INTEGER REFERENCES docentes(id)",
+        ]
+        for sql_mig in _migraciones:
+            try:
+                cur.execute(sql_mig)
+            except Exception as exc_mig:
+                logger.warning("BD: migración omitida (%s): %s", sql_mig[:60], exc_mig)
+                conn.rollback()
+
+        # Reemplaza la restricción antigua UNIQUE(docente_id, semestre) por
+        # un índice parcial único sobre (responsable_nombre, semestre).
+        # NOTA MANUAL: si la constraint original existe en tu BD, ejecuta:
+        #   ALTER TABLE fo_in_17 DROP CONSTRAINT IF EXISTS fo_in_17_docente_id_semestre_key;
+        # antes o después de este bloque. El código siguiente solo añade el índice nuevo.
+        try:
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS fo_in_17_responsable_semestre_idx
+                ON fo_in_17 (responsable_nombre, semestre)
+                WHERE responsable_nombre IS NOT NULL
+            """)
+        except Exception as exc_idx:
+            logger.warning("BD: no se pudo crear índice fo_in_17_responsable_semestre_idx: %s", exc_idx)
+            conn.rollback()
+
         conn.commit()
         logger.info("BD: esquema verificado/inicializado correctamente.")
     except Exception as exc:

@@ -213,8 +213,15 @@ def guardar_reporte(
     semestre: str,
     pdf_path: str,
     fuentes_usadas: str = "[]",
+    responsable_nombre: str | None = None,
+    generado_por_docente_id: int | None = None,
 ) -> None:
-    """Registra en BD que se generó un reporte PDF."""
+    """
+    Registra en BD que se generó un reporte PDF.
+
+    `docente_id` y `generado_por_docente_id` identifican quién solicitó el PDF.
+    `responsable_nombre` identifica de quién son los proyectos del documento.
+    """
     try:
         conn = get_connection()
         cur = get_cursor(conn)
@@ -222,11 +229,12 @@ def guardar_reporte(
             cur.execute(
                 """
                 INSERT INTO reportes_generados
-                  (docente_id, tipo, semestre, pdf_path, fuentes_usadas, fecha_generacion)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                  (docente_id, tipo, semestre, pdf_path, fuentes_usadas,
+                   fecha_generacion, responsable_nombre, generado_por_docente_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (docente_id, tipo, semestre, pdf_path, fuentes_usadas,
-                 datetime.utcnow().isoformat()),
+                 datetime.utcnow().isoformat(), responsable_nombre, generado_por_docente_id),
             )
             conn.commit()
         finally:

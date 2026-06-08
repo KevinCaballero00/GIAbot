@@ -40,11 +40,19 @@ objetos. Cada objeto debe tener exactamente estas claves:
   - "proyecto": título del proyecto a ejecutar (conciso, sin el resumen completo).
   - "objetivo": objetivo principal del proyecto (1-2 frases).
   - "actividades": lista de strings con las actividades principales (máx. 5 ítems cortos).
+    Si las actividades no aparecen explícitas en el texto, DEDÚCELAS lógicamente del
+    objetivo y descripción del proyecto (p. ej. "Revisión de literatura", "Diseño
+    metodológico", "Recolección y análisis de datos", "Redacción de artículo"). No
+    dejes este campo como lista vacía si hay información del proyecto disponible.
   - "responsable": nombre del responsable del proyecto (usa "{responsable}" si el texto lo confirma).
-  - "producto": producto esperado (ponencia, artículo, software, prototipo, etc.) o "".
+  - "producto": producto esperado (ponencia, artículo, software, prototipo, etc.).
+    Si no aparece explícitamente, infiere el producto académico más probable según
+    el tipo de proyecto. No dejes vacío si hay descripción del proyecto.
 
 Reglas estrictas:
-  - NO inventes datos. Si un campo no aparece en el texto, déjalo como cadena vacía "" (o lista vacía).
+  - NO inventes títulos de proyecto, objetivos ni nombre de responsable; si no
+    aparecen en el texto déjalos como cadena vacía "".
+  - Para "actividades" y "producto" sí puedes deducir a partir del objetivo/descripción.
   - Agrupa información que pertenezca al mismo proyecto; no dupliques líneas.
   - Prioriza proyectos atribuibles a "{responsable}".
   - Si no hay proyectos identificables, devuelve un arreglo vacío [].

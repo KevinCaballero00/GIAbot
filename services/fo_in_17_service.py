@@ -4,8 +4,11 @@ Servicio de gestión del FO-IN-17.
 FO-IN-17 es el documento fuente del semestre actual:
   - Se extrae de CvLAC y Google Scholar (via extractor_proyectos)
   - Se normaliza a JSON
-  - Se persiste en la base de datos
+  - Se persiste en la base de datos indexado por (responsable_nombre, semestre)
   - Se refresca automáticamente si han pasado más de 15 días
+
+La tabla `docentes` identifica quién tiene permiso para generar el documento
+(generado_por_docente_id), no de quién son los proyectos (responsable_nombre).
 """
 from __future__ import annotations
 
@@ -54,14 +57,42 @@ def _necesita_refresco(fecha_refresco: str | None) -> bool:
 
 # ── Acceso a la BD ────────────────────────────────────────────────────────────
 
-def obtener_registro(docente_id: int, semestre: str) -> dict | None:
-    """Obtiene el registro FO-IN-17 de la BD; retorna None si no existe."""
+def obtener_registro_por_responsable(responsable_nombre: str, semestre: str) -> dict | None:
+    """Obtiene el registro FO-IN-17 por persona real + semestre; retorna None si no existe."""
     conn = get_connection()
     cur = get_cursor(conn)
     try:
         cur.execute(
-            "SELECT * FROM fo_in_17 WHERE docente_id = %s AND semestre = %s",
-            (docente_id, semestre),
+            "SELECT * FROM fo_in_17 WHERE responsable_nombre = %s AND semestre = %s",
+            (responsable_nombre, semestre),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def obtener_ultimo_fo_in_17_valido() -> dict | None:
+    """
+    Retorna el registro FO-IN-17 más reciente con estado='ok', sin importar
+    de qué docente ni de qué semestre. Es la fuente canónica que usa el FO-IN-13.
+
+    El dict incluye `generado_por_nombre` (nombre del docente que lo solicitó)
+    obtenido por JOIN con la tabla docentes.
+    """
+    conn = get_connection()
+    cur = get_cursor(conn)
+    try:
+        cur.execute(
+            """
+            SELECT f.*, d.nombre AS generado_por_nombre
+            FROM fo_in_17 f
+            LEFT JOIN docentes d ON d.id = f.generado_por_docente_id
+            WHERE f.estado = 'ok'
+            ORDER BY COALESCE(f.fecha_refresco, f.fecha_creacion) DESC
+            LIMIT 1
+            """
         )
         row = cur.fetchone()
         return dict(row) if row else None
@@ -71,22 +102,30 @@ def obtener_registro(docente_id: int, semestre: str) -> dict | None:
 
 
 def _guardar_registro(
-    docente_id: int,
+    generado_por_docente_id: int,
+    responsable_nombre: str,
     semestre: str,
     datos_json: str,
     pdf_path: str,
     fuentes_usadas: str,
+    responsable_cvlac_url: str | None = None,
     estado: str = "ok",
     error_log: str | None = None,
 ) -> None:
-    """Inserta o actualiza el registro en la tabla fo_in_17."""
+    """
+    Inserta o actualiza el registro en fo_in_17.
+
+    La clave lógica es (responsable_nombre, semestre): cada persona tiene como
+    máximo un registro por semestre. docente_id (= generado_por_docente_id) es
+    quien se autenticó y solicitó la generación.
+    """
     ahora = datetime.utcnow().isoformat()
     conn = get_connection()
     cur = get_cursor(conn)
     try:
         cur.execute(
-            "SELECT id FROM fo_in_17 WHERE docente_id = %s AND semestre = %s",
-            (docente_id, semestre),
+            "SELECT id FROM fo_in_17 WHERE responsable_nombre = %s AND semestre = %s",
+            (responsable_nombre, semestre),
         )
         existe = cur.fetchone()
         if existe:
@@ -94,22 +133,26 @@ def _guardar_registro(
                 """
                 UPDATE fo_in_17
                 SET datos_json = %s, pdf_path = %s, fuentes_usadas = %s,
-                    fecha_refresco = %s, estado = %s, error_log = %s
-                WHERE docente_id = %s AND semestre = %s
+                    fecha_refresco = %s, estado = %s, error_log = %s,
+                    generado_por_docente_id = %s, responsable_cvlac_url = %s
+                WHERE responsable_nombre = %s AND semestre = %s
                 """,
                 (datos_json, pdf_path, fuentes_usadas, ahora, estado, error_log,
-                 docente_id, semestre),
+                 generado_por_docente_id, responsable_cvlac_url,
+                 responsable_nombre, semestre),
             )
         else:
             cur.execute(
                 """
                 INSERT INTO fo_in_17
                   (docente_id, semestre, datos_json, pdf_path, fuentes_usadas,
-                   fecha_creacion, fecha_refresco, estado, error_log)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   fecha_creacion, fecha_refresco, estado, error_log,
+                   responsable_nombre, responsable_cvlac_url, generado_por_docente_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (docente_id, semestre, datos_json, pdf_path, fuentes_usadas,
-                 ahora, ahora, estado, error_log),
+                (generado_por_docente_id, semestre, datos_json, pdf_path, fuentes_usadas,
+                 ahora, ahora, estado, error_log,
+                 responsable_nombre, responsable_cvlac_url, generado_por_docente_id),
             )
         conn.commit()
     finally:
@@ -125,20 +168,19 @@ def generar_fo_in_17(
     docente_objetivo: dict | None = None,
 ) -> dict:
     """
-    Genera o refresca el FO-IN-17 del docente para el semestre indicado.
+    Genera o refresca el FO-IN-17 para el semestre indicado.
 
-    Si el semestre no se especifica usa el semestre académico actual.
-    Si ya existe un registro válido (< 15 días) y NO se pidió un docente objetivo
-    distinto, lo retorna directamente sin hacer scraping adicional.
+    `docente` es el docente autenticado (quién pide el documento).
+    `docente_objetivo` (opcional) es la persona cuyos proyectos se documentan.
+    Si se omite, el docente autenticado es también el responsable del documento.
 
-    `docente_objetivo` (opcional): docente cuyos proyectos se piden realmente
-    (ej. el usuario pide "los proyectos de Ana Gissele"). Cuando se proporciona,
-    se ignora la caché y se regenera, ya que el contenido depende de ese nombre.
+    La caché se busca por (responsable_nombre, semestre), de modo que un
+    registro de Ana no sobreescribe el de Fredy ni viceversa.
 
     Retorna dict con:
-      - pdf_nombre: nombre del archivo PDF para construir el enlace de descarga
-      - pdf_path: ruta web relativa del archivo PDF (/static/generados/...)
-      - datos: dict con proyectos y metadatos de extracción
+      - pdf_nombre: nombre del archivo PDF
+      - pdf_path: ruta web relativa (/static/generados/...)
+      - datos: dict con proyectos y metadatos
       - registro: fila completa de la BD
       - advertencia (opcional): mensaje si se usó versión previa por error de refresco
     """
@@ -146,16 +188,20 @@ def generar_fo_in_17(
         semestre, _, _ = calcular_periodo()
 
     docente_id: int = docente["id"]
+    objetivo = docente_objetivo or docente
+    responsable_nombre: str = objetivo.get("nombre", "")
+    responsable_cvlac_url: str | None = (
+        docente_objetivo.get("cvlac_url") if docente_objetivo else None
+    )
 
-    registro = obtener_registro(docente_id, semestre)
+    registro = obtener_registro_por_responsable(responsable_nombre, semestre)
     if (
-        docente_objetivo is None
-        and registro and registro.get("estado") == "ok"
+        registro and registro.get("estado") == "ok"
         and not _necesita_refresco(registro.get("fecha_refresco"))
     ):
         logger.info(
-            "FO-IN-17: registro vigente para docente %d semestre %s",
-            docente_id, semestre,
+            "FO-IN-17: registro vigente para responsable '%s', semestre %s",
+            responsable_nombre, semestre,
         )
         datos = json.loads(registro["datos_json"])
         pdf_path = registro["pdf_path"]
@@ -167,27 +213,27 @@ def generar_fo_in_17(
         }
 
     logger.info(
-        "FO-IN-17: extrayendo datos frescos — docente '%s', objetivo '%s', semestre %s",
+        "FO-IN-17: extrayendo datos frescos — generado por '%s', responsable '%s', semestre %s",
         docente.get("nombre"),
-        (docente_objetivo or {}).get("nombre"),
+        responsable_nombre,
         semestre,
     )
     try:
         resultado = extraer_proyectos(docente, docente_objetivo=docente_objetivo)
         resultado["semestre_destino"] = semestre
 
-        # Filtrar claves de runtime antes de persistir
         datos_para_guardar = {k: v for k, v in resultado.items() if not k.startswith("_")}
         datos_json_str = json.dumps(datos_para_guardar, ensure_ascii=False)
         fuentes_str = json.dumps(resultado.get("fuentes_consultadas", []), ensure_ascii=False)
 
         pdf_path = generar_pdf_fo_in_17_plantilla(resultado)
-        # Guardar SIEMPRE ruta web relativa (portable), no la ruta absoluta local
         pdf_nombre = Path(pdf_path).name
         pdf_web = f"/static/generados/{pdf_nombre}"
 
         _guardar_registro(
-            docente_id=docente_id,
+            generado_por_docente_id=docente_id,
+            responsable_nombre=responsable_nombre,
+            responsable_cvlac_url=responsable_cvlac_url,
             semestre=semestre,
             datos_json=datos_json_str,
             pdf_path=pdf_web,
@@ -196,7 +242,7 @@ def generar_fo_in_17(
         )
 
         return {
-            "registro": obtener_registro(docente_id, semestre),
+            "registro": obtener_registro_por_responsable(responsable_nombre, semestre),
             "pdf_path": pdf_web,
             "pdf_nombre": pdf_nombre,
             "datos": datos_para_guardar,
@@ -205,10 +251,11 @@ def generar_fo_in_17(
     except Exception as exc:
         logger.error("FO-IN-17: error generando documento: %s", exc)
 
-        # Conservar la última versión válida si existe
         if registro and registro.get("estado") == "ok" and registro.get("pdf_path"):
             _guardar_registro(
-                docente_id=docente_id,
+                generado_por_docente_id=docente_id,
+                responsable_nombre=responsable_nombre,
+                responsable_cvlac_url=responsable_cvlac_url,
                 semestre=semestre,
                 datos_json=registro["datos_json"],
                 pdf_path=registro["pdf_path"],
@@ -218,7 +265,7 @@ def generar_fo_in_17(
             )
             datos = json.loads(registro["datos_json"])
             return {
-                "registro": obtener_registro(docente_id, semestre),
+                "registro": obtener_registro_por_responsable(responsable_nombre, semestre),
                 "pdf_path": registro["pdf_path"],
                 "pdf_nombre": Path(registro["pdf_path"]).name,
                 "datos": datos,
@@ -226,7 +273,9 @@ def generar_fo_in_17(
             }
 
         _guardar_registro(
-            docente_id=docente_id,
+            generado_por_docente_id=docente_id,
+            responsable_nombre=responsable_nombre,
+            responsable_cvlac_url=responsable_cvlac_url,
             semestre=semestre,
             datos_json="{}",
             pdf_path="",
@@ -239,10 +288,8 @@ def generar_fo_in_17(
 
 def refrescar_todos(semestre: str | None = None) -> list[dict]:
     """
-    Refresca los registros FO-IN-17 con más de INTERVALO_REFRESCO_DIAS días
-    sin actualizar. Se llama desde el job periódico.
-
-    Retorna lista con el resultado de cada docente procesado.
+    Refresca los registros FO-IN-17 propios de cada docente cuando llevan
+    más de INTERVALO_REFRESCO_DIAS días sin actualizar.
     """
     if semestre is None:
         semestre, _, _ = calcular_periodo()
@@ -258,7 +305,8 @@ def refrescar_todos(semestre: str | None = None) -> list[dict]:
 
     resultados: list[dict] = []
     for docente in docentes:
-        registro = obtener_registro(docente["id"], semestre)
+        # Cada docente es responsable de su propio registro cuando no hay objetivo externo
+        registro = obtener_registro_por_responsable(docente["nombre"], semestre)
         if registro and not _necesita_refresco(registro.get("fecha_refresco")):
             continue
         try:
