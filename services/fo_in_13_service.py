@@ -18,25 +18,22 @@ from services.pdf_fo_in_13 import generar_pdf_fo_in_13_plantilla
 logger = logging.getLogger(__name__)
 
 
-def generar_fo_in_13(
+def obtener_fuente_fo_in_13(
     docente: dict,
     semestre_actual: str | None = None,
     docente_objetivo: dict | None = None,
 ) -> dict:
     """
-    Genera el FO-IN-13 del docente usando el FO-IN-17 del semestre anterior.
+    Obtiene los datos fuente del FO-IN-13: el FO-IN-17 del semestre anterior.
 
-    Flujo:
-      1. Calcula el semestre anterior a semestre_actual.
-      2. Busca en BD el FO-IN-17 de ese semestre.
-      3. Si no existe, lo genera y persiste primero.
-      4. Genera el PDF del FO-IN-13 desde el JSON del FO-IN-17 (sin scraping).
+    No genera el PDF; solo resuelve de dónde salen los proyectos. Se usa antes
+    de preguntar al docente el % de cumplimiento de cada proyecto, y el dict
+    resultante se reutiliza luego en `generar_fo_in_13(...)` para no scrapear dos
+    veces.
 
     Retorna dict con:
-      - pdf_nombre: nombre del archivo para construir enlace de descarga
-      - pdf_path: ruta absoluta del PDF generado
-      - semestre_referencia: semestre del FO-IN-17 usado como fuente
       - datos_fuente: dict con proyectos del FO-IN-17 de referencia
+      - sem_referencia: semestre del FO-IN-17 usado como fuente
     """
     if semestre_actual is None:
         semestre_actual, _, _ = calcular_periodo()
@@ -44,7 +41,7 @@ def generar_fo_in_13(
     sem_anterior = semestre_anterior(semestre_actual)
 
     logger.info(
-        "FO-IN-13: generando para docente '%s' — semestre actual %s, referencia %s",
+        "FO-IN-13: obteniendo fuente para docente '%s' — semestre actual %s, referencia %s",
         docente.get("nombre"), semestre_actual, sem_anterior,
     )
 
@@ -69,10 +66,44 @@ def generar_fo_in_13(
         resultado_17 = generar_fo_in_17(docente, sem_anterior, docente_objetivo=docente_objetivo)
         datos_fuente = resultado_17["datos"]
 
+    return {"datos_fuente": datos_fuente, "sem_referencia": sem_anterior}
+
+
+def generar_fo_in_13(
+    docente: dict,
+    semestre_actual: str | None = None,
+    docente_objetivo: dict | None = None,
+    *,
+    datos_fuente: dict | None = None,
+    sem_referencia: str | None = None,
+    cumplimientos: dict | None = None,
+) -> dict:
+    """
+    Genera el FO-IN-13 del docente usando el FO-IN-17 del semestre anterior.
+
+    Si `datos_fuente`/`sem_referencia` se proporcionan (p. ej. ya obtenidos por
+    `obtener_fuente_fo_in_13` durante la fase de preguntas), se reutilizan y no
+    se vuelve a leer/scrapear el FO-IN-17.
+
+    `cumplimientos` es un dict {titulo_proyecto: "90%"} con los porcentajes que
+    el docente indicó para cada proyecto de la sección 1.
+
+    Retorna dict con:
+      - pdf_nombre: nombre del archivo para construir enlace de descarga
+      - pdf_path: ruta absoluta del PDF generado
+      - semestre_referencia: semestre del FO-IN-17 usado como fuente
+      - datos_fuente: dict con proyectos del FO-IN-17 de referencia
+    """
+    if datos_fuente is None or sem_referencia is None:
+        fuente = obtener_fuente_fo_in_13(docente, semestre_actual, docente_objetivo)
+        datos_fuente = fuente["datos_fuente"]
+        sem_referencia = fuente["sem_referencia"]
+
     # Preparar el dict de entrada para el generador de FO-IN-13
     # Se ajusta el periodo al semestre de referencia para que el encabezado sea correcto
     datos_fo_in_13 = dict(datos_fuente)
-    datos_fo_in_13["periodo"] = sem_anterior
+    datos_fo_in_13["periodo"] = sem_referencia
+    datos_fo_in_13["cumplimientos"] = cumplimientos or {}
 
     pdf_path = generar_pdf_fo_in_13_plantilla(datos_fo_in_13)
     pdf_nombre = Path(pdf_path).name
@@ -80,6 +111,6 @@ def generar_fo_in_13(
     return {
         "pdf_path": pdf_path,
         "pdf_nombre": pdf_nombre,
-        "semestre_referencia": sem_anterior,
+        "semestre_referencia": sem_referencia,
         "datos_fuente": datos_fuente,
     }

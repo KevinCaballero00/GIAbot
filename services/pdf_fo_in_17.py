@@ -16,6 +16,7 @@ from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    Image,
     PageTemplate,
     Paragraph,
     Spacer,
@@ -25,6 +26,9 @@ from reportlab.platypus import (
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "static" / "generados"
 LOGO_PATH = Path(__file__).resolve().parent.parent / "static" / "docs" / "Logo UFPS.png"
+# Firma del director extraída del FO-IN-17 oficial (ver services/extraer_firma.py).
+# Provisional hasta obtener la firma del líder actual del semillero.
+FIRMA_PATH = Path(__file__).resolve().parent.parent / "static" / "docs" / "firma_director.png"
 
 # Director del grupo GIA (constante del formato oficial, no del docente solicitado)
 DIRECTOR_GRUPO = "Fredy Humberto Vera Rivera"
@@ -487,6 +491,24 @@ def _seccion_otras() -> list:
 
 # ── Sección de firma ──────────────────────────────────────────────────────────
 
+def _firma_flowable(alto_cm: float = 1.0):
+    """
+    Devuelve un Image con la firma del director escalada para caber en la celda
+    de firma. Si el PNG no existe, devuelve un párrafo vacío (fallback seguro).
+    """
+    if not FIRMA_PATH.exists():
+        return _p("")
+    try:
+        img = Image(str(FIRMA_PATH))
+        ratio = (img.imageWidth / img.imageHeight) if img.imageHeight else 3.0
+        img.drawHeight = alto_cm * cm
+        img.drawWidth = alto_cm * cm * ratio
+        img.hAlign = "CENTER"
+        return img
+    except Exception:
+        return _p("")
+
+
 def _seccion_firma(docente_info: dict) -> list:
     W = letter[0] - 3.0 * cm
     # Quien firma como Director del Grupo es constante del formato
@@ -501,7 +523,8 @@ def _seccion_firma(docente_info: dict) -> list:
         [_p("Nombre Completo", _LABEL), _p("Nombre Completo", _LABEL)],
         [_p(nombre), _p("Luis Emilio Vera")],
         [_p("Firma", _LABEL), _p("Firma", _LABEL)],
-        [_p(""), _p("")],
+        # Firma del director en ELABORÓ; REVISÓ se deja en blanco (como el original).
+        [_firma_flowable(), _p("")],
     ]
     t = Table(data, colWidths=[W / 2, W / 2])
     t.setStyle(TableStyle(list(_BORDE_BASE) + [
@@ -511,6 +534,7 @@ def _seccion_firma(docente_info: dict) -> list:
         ("FONTNAME", (0, 0), (-1, 1), "Helvetica-Bold"),
         ("ALIGN", (0, 0), (-1, 1), "CENTER"),
         ("MINROWHEIGHT", (0, 4), (-1, 5), 1.2 * cm),
+        ("VALIGN", (0, 5), (-1, 5), "MIDDLE"),
     ]))
     elementos.append(t)
     return elementos

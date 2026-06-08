@@ -16,6 +16,7 @@ from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    Image,
     KeepTogether,
     PageBreak,
     PageTemplate,
@@ -27,6 +28,9 @@ from reportlab.platypus import (
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "static" / "generados"
 LOGO_PATH = Path(__file__).resolve().parent.parent / "static" / "docs" / "Logo UFPS.png"
+# Firma del director extraída del FO-IN-17 oficial (ver services/extraer_firma.py).
+# Provisional hasta obtener la firma del líder actual del semillero.
+FIRMA_PATH = Path(__file__).resolve().parent.parent / "static" / "docs" / "firma_director.png"
 
 # Director del grupo GIA (constante del formato oficial, no del docente solicitado)
 DIRECTOR_GRUPO = "Fredy Humberto Vera Rivera"
@@ -380,8 +384,26 @@ def _bloque_info(docente_info: dict, periodo: str) -> Table:
     return t
 
 
-def _seccion_proyectos(proyectos: list[dict]) -> list:
-    """Genera la tabla de la sección 1: Proyectos de Investigación."""
+def proyectos_validos(proyectos: list[dict]) -> list[dict]:
+    """
+    Filtra y ordena los proyectos que aparecen en la sección 1 del FO-IN-13.
+
+    Es la fuente de verdad del conjunto/orden de proyectos: tanto el generador
+    del PDF como el flujo conversacional de % de cumplimiento (routes/chat.py)
+    deben usar exactamente esta misma lista para que las preguntas y las celdas
+    coincidan.
+    """
+    return [p for p in (proyectos or []) if p.get("proyecto") and not p.get("error")][:6]
+
+
+def _seccion_proyectos(proyectos: list[dict], cumplimientos: dict | None = None) -> list:
+    """Genera la tabla de la sección 1: Proyectos de Investigación.
+
+    `cumplimientos` mapea la **posición** del proyecto en `proyectos_validos`
+    (índice 0..N) a su porcentaje, p. ej. {0: "90%", 1: "80%"}. Se usa índice y
+    no el título porque pueden existir proyectos con títulos repetidos o vacíos.
+    """
+    cumplimientos = cumplimientos or {}
     W = letter[0] - 3.0 * cm
     cw = [W * 0.38, W * 0.48, W * 0.14]
 
@@ -397,21 +419,23 @@ def _seccion_proyectos(proyectos: list[dict]) -> list:
     spans: list[tuple] = []
     row_idx = 1  # empezamos en fila 1 (después del header)
 
-    proyectos_validos = [p for p in proyectos if p.get("proyecto") and not p.get("error")][:6]
-    if not proyectos_validos:
+    proyectos_filtrados = proyectos_validos(proyectos)
+    if not proyectos_filtrados:
         data.append([_p("Sin proyectos identificados en las fuentes consultadas."), "", ""])
         spans.append(("SPAN", (0, 1), (2, 1)))
     else:
-        for proj in proyectos_validos:
+        for pos, proj in enumerate(proyectos_filtrados):
             actividades = _normalizar_actividades(proj.get("actividades"))
             n = max(len(actividades), 1)
             nombre_raw = _v(proj.get("proyecto")) or ""
             nombre_truncado = nombre_raw[:200] + ("..." if len(nombre_raw) > 200 else "")
+            # % cumplimiento indicado por el docente (clave = posición del proyecto)
+            pct = cumplimientos.get(pos, cumplimientos.get(str(pos), ""))
             # Primera fila del proyecto
             data.append([
                 _p(nombre_truncado),
                 _p(actividades[0] if actividades else ""),
-                _p(""),  # % cumplimiento en blanco
+                _p(pct),
             ])
             # Filas adicionales para más actividades
             for k in range(1, n):
@@ -629,6 +653,24 @@ def _seccion_productos(proyectos: list[dict]) -> list:
     return elementos
 
 
+def _firma_flowable(alto_cm: float = 1.0):
+    """
+    Devuelve un Image con la firma del director escalada para caber en la celda
+    de firma. Si el PNG no existe, devuelve un párrafo vacío (fallback seguro).
+    """
+    if not FIRMA_PATH.exists():
+        return _p("")
+    try:
+        img = Image(str(FIRMA_PATH))
+        ratio = (img.imageWidth / img.imageHeight) if img.imageHeight else 3.0
+        img.drawHeight = alto_cm * cm
+        img.drawWidth = alto_cm * cm * ratio
+        img.hAlign = "CENTER"
+        return img
+    except Exception:
+        return _p("")
+
+
 def _seccion_firma(docente_info: dict) -> list:
     """Sección final: ELABORADO POR / REVISADO POR."""
     W = letter[0] - 3.0 * cm
@@ -654,7 +696,8 @@ def _seccion_firma(docente_info: dict) -> list:
         [_p("NOMBRE:", _LABEL), _p("NOMBRE:", _LABEL)],
         [_p(nombre), _p("Luis Emilio Vera")],
         [_p("FIRMA:", _LABEL), _p("FIRMA:", _LABEL)],
-        [_p(""), _p("")],
+        # Firma del director en ELABORADO POR; REVISADO POR se deja en blanco.
+        [_firma_flowable(), _p("")],
     ]
     cw = [W / 2, W / 2]
     style_cmds = list(_BORDE_BASE) + [
@@ -664,6 +707,7 @@ def _seccion_firma(docente_info: dict) -> list:
         ("FONTNAME", (0, 0), (-1, 1), "Helvetica-Bold"),
         ("ALIGN", (0, 0), (-1, 1), "CENTER"),
         ("MINROWHEIGHT", (0, 4), (-1, 5), 1.2 * cm),
+        ("VALIGN", (0, 5), (-1, 5), "MIDDLE"),
     ]
     t = Table(data, colWidths=cw)
     t.setStyle(TableStyle(style_cmds))
@@ -692,6 +736,7 @@ def generar_pdf_fo_in_13_plantilla(resultado: dict) -> str:
     fecha_ext = resultado.get("fecha_extraccion", "")
     fecha_doc = datetime.now().strftime("%d/%m/%Y")
     proyectos = resultado.get("proyectos", [])
+    cumplimientos = resultado.get("cumplimientos") or {}
 
     # ── Márgenes: espacio para encabezado (2.9cm) + contenido ────────────────
     W, H = letter
@@ -731,7 +776,7 @@ def generar_pdf_fo_in_13_plantilla(resultado: dict) -> str:
     story.append(Spacer(1, 0.3 * cm))
 
     # Sección 1: Proyectos
-    for e in _seccion_proyectos(proyectos):
+    for e in _seccion_proyectos(proyectos, cumplimientos):
         story.append(e)
     story.append(Spacer(1, 0.4 * cm))
 

@@ -33,8 +33,9 @@ from services.extractor_proyectos import (
     _obtener_docentes_cvlac,
     _normalizar_nombre,
 )
-from services.fo_in_13_service import generar_fo_in_13
+from services.fo_in_13_service import generar_fo_in_13, obtener_fuente_fo_in_13
 from services.fo_in_17_service import generar_fo_in_17
+from services.pdf_fo_in_13 import proyectos_validos
 
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,20 @@ VERBOS_SOLICITUD = [
 
 # ── Detectores de intención ───────────────────────────────────────────────────
 
+def _parse_porcentaje(mensaje: str) -> str | None:
+    """
+    Extrae un porcentaje válido (0–100) del mensaje y lo normaliza a 'NN%'.
+    Acepta '90', '90%', 'el 90 %', etc. Retorna None si no hay un valor válido.
+    """
+    m = re.search(r"\d{1,3}", mensaje or "")
+    if not m:
+        return None
+    valor = int(m.group(0))
+    if valor < 0 or valor > 100:
+        return None
+    return f"{valor}%"
+
+
 def detectar_intencion_completar(mensaje: str) -> int | None:
     """Retorna 13, 17 o None."""
     msg = mensaje.lower()
@@ -229,73 +244,217 @@ def detectar_docente_solicitado(mensaje: str) -> dict | None:
 
 # ── Construcción de respuesta con extracción de PDFs ────────────────────────
 
-async def construir_respuesta_con_extraccion(
-    pdfs: list,
-    docente: dict | None = None,
-    docente_objetivo: dict | None = None,
-) -> tuple[str, list[str]]:
-    """
-    Construye la respuesta para una solicitud de PDFs.
-    Retorna (texto_respuesta, lista_fuentes_usadas).
-    """
-    semestre_actual, _, _ = calcular_periodo()
-    partes: list[str] = []
-    fuentes: list[str] = []
-    nota_objetivo = (
+def _nota_objetivo(docente_objetivo: dict | None) -> str:
+    return (
         f"\n👤 Proyectos atribuidos a: **{docente_objetivo['nombre']}**"
         if docente_objetivo else ""
     )
 
+
+async def _bloque_fo_in_17(
+    docente: dict | None,
+    docente_objetivo: dict | None,
+    semestre_actual: str,
+) -> tuple[str, list[str]]:
+    """Genera el FO-IN-17 y devuelve (bloque_markdown, fuentes)."""
+    fuentes: list[str] = []
+    try:
+        resultado_17 = await asyncio.to_thread(
+            generar_fo_in_17, docente, semestre_actual, docente_objetivo
+        )
+        nombre_17 = resultado_17["pdf_nombre"]
+        advertencia = resultado_17.get("advertencia", "")
+        fuentes.extend(resultado_17.get("datos", {}).get("fuentes_consultadas", []))
+        bloque = (
+            "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
+            f"Semestre: {semestre_actual}{_nota_objetivo(docente_objetivo)}\n"
+            f"👉 [Descargar informe (PDF)](/descargar/17/{nombre_17})"
+        )
+        if advertencia:
+            bloque += f"\n⚠️ {advertencia}"
+        _guardar_reporte_asinc(docente, "17", semestre_actual, nombre_17, fuentes)
+        return bloque, fuentes
+    except Exception as exc:
+        return (
+            "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
+            f"⚠️ No se pudo generar el PDF: {exc}\n"
+            "👉 [Descargar plantilla base](/static/docs/FO-IN-17%20PLAN%20DE%20ACCION%20GRUPOS%20INV%20V1.pdf)",
+            fuentes,
+        )
+
+
+async def _bloque_fo_in_13(
+    docente: dict | None,
+    docente_objetivo: dict | None,
+    semestre_actual: str,
+    datos_fuente: dict | None = None,
+    sem_referencia: str | None = None,
+    cumplimientos: dict | None = None,
+) -> str:
+    """Genera el FO-IN-13 (con % opcional) y devuelve el bloque markdown."""
+    try:
+        resultado_13 = await asyncio.to_thread(
+            lambda: generar_fo_in_13(
+                docente, semestre_actual, docente_objetivo,
+                datos_fuente=datos_fuente, sem_referencia=sem_referencia,
+                cumplimientos=cumplimientos,
+            )
+        )
+        nombre_13 = resultado_13["pdf_nombre"]
+        sem_ref = resultado_13["semestre_referencia"]
+        _guardar_reporte_asinc(docente, "13", semestre_actual, nombre_13, [])
+        return (
+            "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
+            f"Generado a partir del Plan de Acción (FO-IN-17) del semestre {sem_ref}."
+            f"{_nota_objetivo(docente_objetivo)}\n"
+            f"👉 [Descargar informe (PDF)](/descargar/13/{nombre_13})"
+        )
+    except Exception as exc:
+        return (
+            "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
+            f"⚠️ No se pudo generar el informe: {exc}"
+        )
+
+
+def _nombre_corto(titulo: str | None, max_chars: int = 120) -> str:
+    t = (titulo or "").strip()
+    return t[:max_chars] + ("..." if len(t) > max_chars else "") if t else "este proyecto"
+
+
+def _pregunta_cumplimiento(proyecto: dict) -> str:
+    return f"Indique el porcentaje de cumplimiento del proyecto **{_nombre_corto(proyecto.get('proyecto'))}**"
+
+
+async def iniciar_entrega_pdfs(
+    session_id: str,
+    pdfs: list,
+    docente: dict | None,
+    docente_objetivo: dict | None,
+) -> tuple[str, list[str]]:
+    """
+    Orquesta la entrega de los PDFs solicitados.
+
+    - FO-IN-17 se genera y entrega de inmediato.
+    - FO-IN-13: si el FO-IN-17 de referencia tiene proyectos, NO se genera aún;
+      se inicia el flujo conversacional de % de cumplimiento (estado
+      `recolectando_cumplimiento`) preguntando proyecto por proyecto. Si no hay
+      proyectos, se genera directo (sin preguntas).
+
+    Retorna (texto_respuesta, fuentes).
+    """
+    semestre_actual, _, _ = calcular_periodo()
+    partes: list[str] = []
+    fuentes: list[str] = []
+    inicio_preguntas = False
+
     if 17 in pdfs:
-        try:
-            resultado_17 = await asyncio.to_thread(
-                generar_fo_in_17, docente, semestre_actual, docente_objetivo
-            )
-            nombre_17 = resultado_17["pdf_nombre"]
-            advertencia = resultado_17.get("advertencia", "")
-            fuentes.extend(resultado_17.get("datos", {}).get("fuentes_consultadas", []))
-            bloque = (
-                "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
-                f"Semestre: {semestre_actual}{nota_objetivo}\n"
-                f"👉 [Descargar informe (PDF)](/descargar/17/{nombre_17})"
-            )
-            if advertencia:
-                bloque += f"\n⚠️ {advertencia}"
-            partes.append(bloque)
-            # Registrar reporte generado
-            _guardar_reporte_asinc(docente, "17", semestre_actual, nombre_17, fuentes)
-        except Exception as exc:
-            partes.append(
-                "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
-                f"⚠️ No se pudo generar el PDF: {exc}\n"
-                "👉 [Descargar plantilla base](/static/docs/FO-IN-17%20PLAN%20DE%20ACCION%20GRUPOS%20INV%20V1.pdf)"
-            )
+        bloque_17, fuentes_17 = await _bloque_fo_in_17(docente, docente_objetivo, semestre_actual)
+        partes.append(bloque_17)
+        fuentes.extend(fuentes_17)
 
     if 13 in pdfs:
         try:
-            resultado_13 = await asyncio.to_thread(
-                generar_fo_in_13, docente, semestre_actual, docente_objetivo
+            fuente = await asyncio.to_thread(
+                obtener_fuente_fo_in_13, docente, semestre_actual, docente_objetivo
             )
-            nombre_13 = resultado_13["pdf_nombre"]
-            sem_ref = resultado_13["semestre_referencia"]
-            partes.append(
-                "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
-                f"Generado a partir del Plan de Acción (FO-IN-17) del semestre {sem_ref}.{nota_objetivo}\n"
-                f"👉 [Descargar informe (PDF)](/descargar/13/{nombre_13})"
-            )
-            _guardar_reporte_asinc(docente, "13", semestre_actual, nombre_13, fuentes)
+            datos_fuente = fuente["datos_fuente"]
+            sem_ref = fuente["sem_referencia"]
+            proyectos = proyectos_validos(datos_fuente.get("proyectos", []))
         except Exception as exc:
             partes.append(
                 "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
-                f"⚠️ No se pudo generar el informe: {exc}"
+                f"⚠️ No se pudo preparar el informe: {exc}"
             )
+            proyectos = []
+            datos_fuente = None
+            sem_ref = None
 
-    intro = (
-        "Aquí tienes los documentos solicitados:"
-        if len(pdfs) > 1
-        else "Aquí tienes el documento solicitado:"
+        if datos_fuente is not None and proyectos:
+            # Iniciar flujo conversacional de % de cumplimiento.
+            estado = sesiones_activas.setdefault(session_id, {})
+            estado.update({
+                "paso": "recolectando_cumplimiento",
+                "autenticado": True,
+                "docente": docente,
+                "cumpl_proyectos": proyectos,
+                "cumpl_idx": 0,
+                "cumpl_valores": {},
+                "cumpl_datos_fuente": datos_fuente,
+                "cumpl_sem_referencia": sem_ref,
+                "cumpl_docente_objetivo": docente_objetivo,
+            })
+            intro_13 = (
+                "Para generar el **FO-IN-13** necesito el porcentaje de cumplimiento "
+                f"de cada uno de los {len(proyectos)} proyectos del Plan de Acción "
+                f"(FO-IN-17) del semestre {sem_ref}.\n\n"
+                + _pregunta_cumplimiento(proyectos[0])
+            )
+            partes.append(intro_13)
+            inicio_preguntas = True
+        elif datos_fuente is not None:
+            # Sin proyectos → generar directo, sin preguntas.
+            partes.append(await _bloque_fo_in_13(
+                docente, docente_objetivo, semestre_actual,
+                datos_fuente=datos_fuente, sem_referencia=sem_ref, cumplimientos={},
+            ))
+
+    if inicio_preguntas:
+        # Aún no se entrega el FO-IN-13; se inician las preguntas de %.
+        intro = "Aquí tienes el FO-IN-17 solicitado:" if 17 in pdfs else ""
+    else:
+        intro = (
+            "Aquí tienes los documentos solicitados:"
+            if len(pdfs) > 1
+            else "Aquí tienes el documento solicitado:"
+        )
+    return (intro + "\n\n" + "\n\n".join(partes)).strip(), fuentes
+
+
+async def _procesar_cumplimiento(session_id: str, mensaje: str) -> str:
+    """Procesa cada respuesta del flujo de % de cumplimiento del FO-IN-13."""
+    estado = sesiones_activas[session_id]
+    proyectos = estado["cumpl_proyectos"]
+    idx = estado["cumpl_idx"]
+    proyecto_actual = proyectos[idx]
+    titulo = (proyecto_actual.get("proyecto") or "").strip()
+
+    pct = _parse_porcentaje(mensaje)
+    if pct is None:
+        return (
+            "Por favor indica un porcentaje entre 0 y 100 (por ejemplo: **90%**) para el "
+            f"proyecto **{_nombre_corto(titulo)}**."
+        )
+
+    # Clave por posición (no por título): los títulos pueden repetirse o venir vacíos.
+    estado["cumpl_valores"][idx] = pct
+    estado["cumpl_idx"] = idx + 1
+
+    # ¿Quedan más proyectos por preguntar?
+    if estado["cumpl_idx"] < len(proyectos):
+        siguiente = proyectos[estado["cumpl_idx"]]
+        return f"✅ {pct} registrado.\n\n{_pregunta_cumplimiento(siguiente)}"
+
+    # Todos respondidos → generar el FO-IN-13 con los porcentajes.
+    semestre_actual, _, _ = calcular_periodo()
+    docente = estado.get("docente")
+    bloque = await _bloque_fo_in_13(
+        docente,
+        estado.get("cumpl_docente_objetivo"),
+        semestre_actual,
+        datos_fuente=estado.get("cumpl_datos_fuente"),
+        sem_referencia=estado.get("cumpl_sem_referencia"),
+        cumplimientos=estado.get("cumpl_valores", {}),
     )
-    return intro + "\n\n" + "\n\n".join(partes), fuentes
+
+    # Limpiar el estado conversacional y volver a "autenticado".
+    estado["paso"] = "autenticado"
+    for clave in (
+        "cumpl_proyectos", "cumpl_idx", "cumpl_valores",
+        "cumpl_datos_fuente", "cumpl_sem_referencia", "cumpl_docente_objetivo",
+    ):
+        estado.pop(clave, None)
+
+    return "✅ ¡Listo! Generé tu informe con los porcentajes indicados.\n\n" + bloque
 
 
 def _guardar_reporte_asinc(docente, tipo, semestre, pdf_nombre, fuentes):
@@ -465,8 +624,8 @@ async def chat(data: Message):
 
                 pdfs = estado.get("pdfs_solicitados", [])
                 docente_obj = estado.get("docente_solicitado")
-                respuesta_docs, fuentes_log = await construir_respuesta_con_extraccion(
-                    pdfs, docente, docente_obj
+                respuesta_docs, fuentes_log = await iniciar_entrega_pdfs(
+                    session_id, pdfs, docente, docente_obj
                 )
                 intencion = f"solicitud_pdf_{pdfs}"
                 respuesta = f"✅ Bienvenido/a, **{docente['nombre']}**. Acceso verificado.\n\n" + respuesta_docs
@@ -484,6 +643,12 @@ async def chat(data: Message):
         if estado and estado.get("paso") == "registrando_proyecto":
             intencion = "registrar_proyecto"
             respuesta = await _procesar_registro_proyecto(session_id, mensaje)
+            return {"reply": respuesta}
+
+        # ── 2b. Flujo de % de cumplimiento del FO-IN-13 en curso ────────────
+        if estado and estado.get("paso") == "recolectando_cumplimiento":
+            intencion = "solicitud_pdf_[13]"
+            respuesta = await _procesar_cumplimiento(session_id, mensaje)
             return {"reply": respuesta}
 
         # ── 3. Flujo de completado de PDF en curso ──────────────────────────
@@ -521,8 +686,8 @@ async def chat(data: Message):
             intencion = f"solicitud_pdf_{pdfs_solicitados}"
             docente_solicitado = await asyncio.to_thread(detectar_docente_solicitado, mensaje)
             if autenticado:
-                respuesta, fuentes_log = await construir_respuesta_con_extraccion(
-                    pdfs_solicitados, estado["docente"], docente_solicitado
+                respuesta, fuentes_log = await iniciar_entrega_pdfs(
+                    session_id, pdfs_solicitados, estado["docente"], docente_solicitado
                 )
             else:
                 sesiones_activas[session_id] = {
