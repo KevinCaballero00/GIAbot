@@ -1,0 +1,172 @@
+{
+  "docente": {
+    "id": 1,
+    "nombre": "Fredy Vera Rivera",
+    "usuario": "fvera"
+  },
+  "responsable": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+  "periodo": "2026-1",
+  "proyectos": [
+    {
+      "linea": "Transformación Digital",
+      "proyecto": "Modelo ágil para el diagnóstico y formulación de propuestas de Transformación Digital en las Mypimes de la Ciudad de Cúcuta.",
+      "objetivo": "Crear un modelo ágil para el diagnóstico y formulación de propuestas de Transformación Digital en las Mypimes de Cúcuta.",
+      "actividades": [],
+      "responsable": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "producto": ""
+    },
+    {
+      "linea": "Aprendizaje Automático, Sistemas Inteligentes, Gestión Ambiental",
+      "proyecto": "SISTEMA AUTÓNOMO DE SUPERVISIÓN DE RESIDUOS PELIGROSOS BASADO EN TÉCNICAS DE APRENDIZAJE AUTOMÁTICO",
+      "objetivo": "Conceptualizar un Sistema Autónomo de Supervisión Inteligente de Residuos Peligrosos para Norte de Santander, basado en aprendizaje automático, meta-aprendizaje y ciclos autónomos de análisis de datos, para optimizar la gestión de RESPEL.",
+      "actividades": [
+        "Conceptualización del sistema de supervisión inteligente",
+        "Aplicación de técnicas de aprendizaje automático",
+        "Uso de meta-aprendizaje y ciclos autónomos de análisis de datos",
+        "Simulaciones en contextos industriales",
+        "Optimización de gestión de residuos peligrosos"
+      ],
+      "responsable": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "producto": "Sistema Autónomo de Supervisión Inteligente de Residuos Peligrosos (prototipo/software), Producción científica y tecnológica"
+    },
+    {
+      "linea": "Inteligencia Artificial, Ingeniería de Sistemas, Aprendizaje Automático, Ciencia de Datos, Robótica",
+      "proyecto": "Diseño de mecanismos inteligentes artificiales para la solución de problemas en Ingeniería de sistemas",
+      "objetivo": "Diseñar e implantar productos de software inteligentes y entes robóticos para la construcción de sistemas inteligentes, aplicando técnicas de IA, Machine Learning, Ciencia de Datos y sistemas complejos.",
+      "actividades": [
+        "Diseño de productos de software inteligentes",
+        "Implantación de entes robóticos",
+        "Aplicación de Inteligencia Artificial",
+        "Uso de Machine Learning y Ciencia de Datos"
+      ],
+      "responsable": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "producto": "Productos de software inteligentes, Entes robóticos (software/prototipo)"
+    },
+    {
+      "linea": "Aprendizaje de Máquina, Sistemas Inteligentes",
+      "proyecto": "Diseño de Mecanismos de Aprendizaje de Maquina para sistemas inteligentes",
+      "objetivo": "Diseñar estrategias de Aprendizaje de Máquina basadas en procesos biológicos (neocórtex humano) para su aplicación en sistemas inteligentes en diversos dominios.",
+      "actividades": [
+        "Diseño de estrategias de Aprendizaje de Máquina",
+        "Basado en procesos biológicos (neocórtex humano)",
+        "Aplicación en sistemas inteligentes (médicos, ambientales, sociales)"
+      ],
+      "responsable": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "producto": "Estrategias de Aprendizaje de Máquina (artículo/modelo)"
+    },
+    {
+      "linea": "Web Semántica, Motores de Búsqueda, Ontologías, Aprendizaje Automático",
+      "proyecto": "MOTOR DE BÚSQUEDA BASADO EN ONTOLOGÍAS",
+      "objetivo": "Proponer un modelo de motor de búsqueda basado en ontologías, detallando su motor de aprendizaje como mecanismo de adaptación y experticia, y especificando el proceso de aprendizaje léxico.",
+      "actividades": [
+        "Propuesta de modelo de motor de búsqueda basado en ontologías",
+        "Ampliación del motor de aprendizaje",
+        "Especificación del proceso de aprendizaje léxico"
+      ],
+      "responsable": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "producto": "Modelo de motor de búsqueda basado en ontologías (software/prototipo, artículo)"
+    },
+    {
+      "linea": "Ingeniería Ontológica, Ingeniería del Software, Representación de Conocimiento, Bases de Datos",
+      "proyecto": "REPRESENTACIÓN DE CONOCIMIENTO USANDO TÉCNICAS DE INGENIERÍA ONTOLÓGICA, INGENIERÍA DEL SOFTWARE Y TECNOLOGÍA DE BASES DE DATOS PARA LA CONSTRUCCIÓN DE SISTEMAS DE INFORMACIÓN",
+      "objetivo": "Caracterizar la expresividad semántica y servicios de razonamiento de modelos como Entidad-Interrelación, UML y OWL para el modelado de ontologías en sistemas de información.",
+      "actividades": [
+        "Caracterización conceptual de expresividad semántica",
+        "Análisis de servicios de razonamiento de modelos (Entidad-Interrelación, UML, OWL)",
+        "Modelado de ontologías"
+      ],
+      "responsable": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "producto": "Caracterización conceptual (artículo/ponencia)"
+    }
+  ],
+  "_proyectos_crudos": [
+    {
+      "fuente": "GIA Web – /proyectos/",
+      "docente": null,
+      "proyecto": "Proyectos de GIA",
+      "periodo": null,
+      "descripcion": null,
+      "enlace_origen": "https://gia.ufps.edu.co/proyectos/",
+      "fecha_extraccion": "2026-06-04T22:24:21.759857"
+    },
+    {
+      "fuente": "GIA Web – /proyectos/",
+      "docente": null,
+      "proyecto": "Transformación digital de las Mypimes",
+      "periodo": null,
+      "descripcion": "Modelo ágil para el diagnóstico y formulación de propuestas de Transformación Digital en las Mypimes de la Ciudad de\n                Cúcuta. Responsable: Eduard Gilberto Puerto Cuadros Crear una propuesta de Maestría en Transformación digital. Responsable: Milton Jesús Vera Contreras Validar y transferir conocimiento del modelo inteligente para identificar y especificar microservicios\n                 a empresas de desarrollo de software. Responsable: Fredy Humberto Vera Rivera. Analizar las diferentes estrategias de deuda técnica usadas en proyecto de software en Colombia. Responsable: Boris Rainiero Pérez Gutierrez. Identificar patrones de deserción estudiantil, pérdida materias y repetición usando técnicas de analítica de datos. Responsable: Ana Gissel Gutierrez Buitrago. Caracterizar l",
+      "enlace_origen": "https://gia.ufps.edu.co/proyectos/",
+      "fecha_extraccion": "2026-06-04T22:24:21.759857"
+    },
+    {
+      "fuente": "CvLAC (Minciencias)",
+      "docente": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "proyecto": "Tipo de proyecto:",
+      "periodo": "2006",
+      "descripcion": "Tipo de proyecto:\nInvestigación y desarrollo\nDISEÑO DE UN SISTEMA DINAMICO SEMANTICO PARA CONSULTAS EN LENGUAJE NATURAL A LA WEB SEMANTICA\nInicio:\nFebrero \r\n                        2006\nFin proyectado:\nEnero \r\n                        2011\nFin:\nFebrero \r\n                        2008\nDuración\n60\nResumen\nEn este proyecto se propone la construcción de un motor de consulta en lenguaje Natural (Español) para la Web Semantica. De la consulta en lenguaje natural se extrae, a traves de especificaciones ontologicas y tecnicas de procesamiento de lenguaje natural (PLN), el significado pretendido por el usuario el cual es tranformado a un formato comprensible por la máquina, esto es en OWL.",
+      "enlace_origen": "https://scienti.minciencias.gov.co/cvlac/visualizador/generarCurriculoCv.do?cod_rh=0000282952",
+      "fecha_extraccion": "2026-06-04T22:24:22.372309"
+    },
+    {
+      "fuente": "CvLAC (Minciencias)",
+      "docente": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "proyecto": "Tipo de proyecto:",
+      "periodo": "2010",
+      "descripcion": "Tipo de proyecto:\nInvestigación y desarrollo\nREPRESENTACIÓN DE CONOCIMIENTO USANDO TÉCNICAS DE INGENIERÍA ONTOLÓGICA, INGENIERÍA DEL SOFTWARE  Y TECNOLOGÍA DE BASES  DE DATOS PARA LA CONSTRUCCIÓN DE SISTEMAS DE INFORMACIÓN\nInicio:\nAgosto \r\n                        2010\nFin proyectado:\nNoviembre \r\n                        2011\nFin:\nFebrero \r\n                        2013\nDuración\n1\nResumen\nCaracterizar a un nivel conceptual la expresividad semántica y servicios de razonamiento de los modelos Entidad Interrelación, UML y OWL para el modelado de Ontologías en sistemas de informaciòn.",
+      "enlace_origen": "https://scienti.minciencias.gov.co/cvlac/visualizador/generarCurriculoCv.do?cod_rh=0000282952",
+      "fecha_extraccion": "2026-06-04T22:24:22.372309"
+    },
+    {
+      "fuente": "CvLAC (Minciencias)",
+      "docente": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "proyecto": "Tipo de proyecto:",
+      "periodo": "2012",
+      "descripcion": "Tipo de proyecto:\nInvestigación, desarrollo e Innovación\nMOTOR DE BÚSQUEDA BASADO EN ONTOLOGÍAS\nInicio:\nSeptiembre \r\n                        2012\nFin:\nSeptiembre \r\n                        2013\nDuración\nResumen\nDescubrir información en la World Wid Web es una cuestión crítica que implica no sólo tratar con texto en lenguaje natural en Internet sino también con el crecimiento exponencial de los requerimientos y expectativas de los usuarios. Para afrontar esta situación, se lleva a cabo activamente investigación en la web semántica y motores de búsqueda semánticos y/o inteligentes, donde el concepto de ontología es establecido en el proceso de búsqueda. En este proyecto, un modelo de motor de búsqueda basado en ontologías es propuesto y se amplia con mas detalle uno de sus principales componentes, esto es, el motor de aprendizaje que hace las veces de mecanismo de adaptación y experticia para el sistema. A su vez de especifica explícitamente el proceso de aprendizaje léxico.",
+      "enlace_origen": "https://scienti.minciencias.gov.co/cvlac/visualizador/generarCurriculoCv.do?cod_rh=0000282952",
+      "fecha_extraccion": "2026-06-04T22:24:22.372309"
+    },
+    {
+      "fuente": "CvLAC (Minciencias)",
+      "docente": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "proyecto": "Tipo de proyecto:",
+      "periodo": "2004",
+      "descripcion": "Tipo de proyecto:\nInvestigación y desarrollo\nSISTEMA DE REPRESENTACION Y GESTION DEL CONOCIMIENTO BASADO EN LÓGICAS DESCRIPTIVAS\nInicio:\nFebrero \r\n                        2004\nFin:\nDiciembre \r\n                        2010\nDuración\nResumen",
+      "enlace_origen": "https://scienti.minciencias.gov.co/cvlac/visualizador/generarCurriculoCv.do?cod_rh=0000282952",
+      "fecha_extraccion": "2026-06-04T22:24:22.372309"
+    },
+    {
+      "fuente": "CvLAC (Minciencias)",
+      "docente": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "proyecto": "Tipo de proyecto:",
+      "periodo": "2015",
+      "descripcion": "Tipo de proyecto:\nInvestigación y desarrollo\nDiseño de Mecanismos de Aprendizaje de Maquina para sistemas inteligentes\nInicio:\nOctubre \r\n                        2015\nFin:\nDiciembre \r\n                        2016\nDuración\nResumen\nSe diseñan diversas estrategias de Aprendizaje de Maquina basados en procesos biológicos (específicamente del neocortex humano ) para ser aplicados en sistemas inteligentes  en diversos dominios; médicos,  ambientales, sociales, etc.",
+      "enlace_origen": "https://scienti.minciencias.gov.co/cvlac/visualizador/generarCurriculoCv.do?cod_rh=0000282952",
+      "fecha_extraccion": "2026-06-04T22:24:22.372309"
+    },
+    {
+      "fuente": "CvLAC (Minciencias)",
+      "docente": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "proyecto": "Tipo de proyecto:",
+      "periodo": "2016",
+      "descripcion": "Tipo de proyecto:\nInvestigación y desarrollo\nDiseño de mecanismos inteligentes artificiales para la solución de problemas en Ingeniería de sistemas\nInicio:\nNoviembre \r\n                        2016\nFin:\nOctubre \r\n                        2018\nDuración\nResumen\nSe diseñan e implantan productos de software inteligentes y entes robóticos para la construcción de sistemas inteligentes. Estos artefactos se basan en técnicas de Inteligencia artificial, Maching Learnig, Ciencia de Datos y sistemas complejos.",
+      "enlace_origen": "https://scienti.minciencias.gov.co/cvlac/visualizador/generarCurriculoCv.do?cod_rh=0000282952",
+      "fecha_extraccion": "2026-06-04T22:24:22.372309"
+    },
+    {
+      "fuente": "CvLAC (Minciencias)",
+      "docente": "Eduard Gilberto Puerto Cuadros, Ph.D.",
+      "proyecto": "Tipo de proyecto:",
+      "periodo": "2022",
+      "descripcion": "Tipo de proyecto:\nInvestigación y desarrollo\nSISTEMA AUTÓNOMO DE SUPERVISIÓN DE RESIDUOS PELIGROSOS BASADO EN TÉCNICAS DE APRENDIZAJE AUTOMÁTICO\nInicio:\nSeptiembre \r\n                        2022\nFin:\nSeptiembre \r\n                        2023\nDuración\nResumen\nel proyecto busca generar una nueva producción científica y\r\ntecnológica a través de la conceptualización de un Sistema Autónomo de Supervisión Inteligente de Residuos Peligrosos basado\r\nen técnicas de aprendizaje automático para el Departamento Norte de Santander, y hacer simulaciones en diferentes contextos\r\nindustriales con producción de RESPEL. El sistema inteligente se caracteriza por tener una base tecnológica innovadora, basada\r\nen los paradigmas de Meta-aprendizaje y Ciclos Autónomos de Tareas de Análisis de Datos, permitiendo que el sistema adquiera\r\nla capacidad de auto-aprender a partir de los datos generados por el ecosistema de residuos peligrosos y experiencias de los\r\nexpertos buscando un compromiso adecuado entre minimizar los residuos peligrosos (cuidado del medio ambiente) y maximizar los\r\nbeneficios de las industrias, permitiendo una mayor eficiencia y precisión en el análisis y uso de los datos, lo cual se t",
+      "enlace_origen": "https://scienti.minciencias.gov.co/cvlac/visualizador/generarCurriculoCv.do?cod_rh=0000282952",
+      "fecha_extraccion": "2026-06-04T22:24:22.372309"
+    }
+  ],
+  "fuentes_consultadas": [
+    "GIA Web – /proyectos/",
+    "CvLAC de Eduard Gilberto Puerto Cuadros, Ph.D."
+  ],
+  "errores": [],
+  "fecha_extraccion": "2026-06-04T22:24:21.759823",
+  "duracion_segundos": 26.86
+}

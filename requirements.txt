@@ -7,3 +7,4 @@ beautifulsoup4
 reportlab
 pypdf
 pydantic
+psycopg2-binary

@@ -1,7 +1,24 @@
+"""
+Router principal de chat de GIAbot.
+
+Maneja en orden de prioridad:
+  1. Flujos de autenticación en curso (usuario/contraseña).
+  2. Flujo de registro conversacional de proyectos en curso.
+  3. Flujo de completado de PDF en curso.
+  4. Detección de solicitud de PDFs (FO-IN-13 / FO-IN-17).
+  5. Detección de intención de registrar proyecto.
+  6. Detección de intención de completar PDF.
+  7. Chat normal delegado al LLM.
+
+Todas las interacciones quedan registradas en conversation_logs.
+"""
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -40,54 +57,103 @@ _STOPWORDS_NOMBRE = {
 }
 
 # ── Sesiones activas en memoria { session_id: {docente, estado} } ─────────────
-# La session_id se construye desde el frontend (ver nota abajo)
 sesiones_activas: dict = {}
 
 # ── Alias de los PDFs ─────────────────────────────────────────────────────────
 ALIASES_13 = [
     "fo-in-13", "fo in 13", "foin13", "informe 13", "número 13",
     "numero 13", "informe gestion", "gestión grupos", "gestion grupos",
-    "informe de gestión", "informe de gestion"
+    "informe de gestión", "informe de gestion",
 ]
 
 ALIASES_17 = [
     "fo-in-17", "fo in 17", "foin17", "informe 17", "número 17",
     "numero 17", "plan de accion", "plan de acción", "plan accion",
-    "plan acción"
+    "plan acción",
 ]
 
-# ── Alias para detectar intención de COMPLETAR (no solo descargar) ────────────
+# ── Alias para completar PDF ──────────────────────────────────────────────────
 ALIASES_COMPLETAR = [
-    "completar", "llenar", "rellenar", "diligenciar", "llena este", "completa este"
+    "completar", "llenar", "rellenar", "diligenciar", "llena este", "completa este",
 ]
 
-def detectar_intencion_completar(mensaje: str):
-    """Detecta si el usuario quiere COMPLETAR un PDF en lugar de solo descargarlo.
-    Retorna 13, 17 o None."""
-    msg = mensaje.lower()
-    
-    # Debe tener una palabra de completado
-    tiene_verbo_completar = any(v in msg for v in ALIASES_COMPLETAR)
-    if not tiene_verbo_completar:
-        return None
-    
-    # Detectar cuál PDF quiere completar
-    if any(alias in msg for alias in ALIASES_13):
-        return 13
-    if any(alias in msg for alias in ALIASES_17):
-        return 17
-    
-    return None
+# ── Alias para registrar proyecto ─────────────────────────────────────────────
+ALIASES_REGISTRAR = [
+    "registrar proyecto", "registrar un proyecto", "quiero registrar",
+    "agregar proyecto", "añadir proyecto", "nuevo proyecto",
+    "ingresar proyecto", "cargar proyecto", "registrar mi proyecto",
+    "quiero agregar un proyecto", "cargar un nuevo proyecto",
+]
+
+# ── Campos del formulario de registro de proyecto ────────────────────────────
+_CAMPOS_PROYECTO = [
+    {
+        "clave": "titulo",
+        "pregunta": "¿Cuál es el **título** del proyecto?",
+        "obligatorio": True,
+        "default": None,
+    },
+    {
+        "clave": "linea",
+        "pregunta": "¿A qué **línea de investigación** pertenece?\n_(Ej: Sistemas Inteligentes Aplicados — deja vacío para usar esa por defecto)_",
+        "obligatorio": False,
+        "default": "Sistemas Inteligentes Aplicados",
+    },
+    {
+        "clave": "objetivo",
+        "pregunta": "Describe el **objetivo principal** del proyecto en 1–2 frases:",
+        "obligatorio": False,
+        "default": "",
+    },
+    {
+        "clave": "actividades",
+        "pregunta": "Lista las **actividades principales** separadas por comas\n_(Ej: Revisión bibliográfica, Diseño del modelo, Pruebas)_:",
+        "obligatorio": False,
+        "default": "",
+    },
+    {
+        "clave": "producto",
+        "pregunta": "¿Cuál es el **producto esperado**?\n_(artículo, ponencia, software, prototipo, informe…)_:",
+        "obligatorio": False,
+        "default": "",
+    },
+    {
+        "clave": "periodo",
+        "pregunta": "¿En qué **período académico**?\n_(deja vacío para usar el semestre actual)_",
+        "obligatorio": False,
+        "default": None,  # se resuelve en tiempo de ejecución
+    },
+]
 
 VERBOS_SOLICITUD = [
     "genera", "généra", "envía", "envia", "manda", "dame", "necesito",
     "quiero", "descarga", "obten", "obtén", "proporciona", "muéstrame",
     "muestrame", "pásamelo", "pasamelo", "ahora", "también", "tambien",
-    "completar", "rellenar", "llenar", "completa", "rellena", "llena  "
+    "completar", "rellenar", "llenar", "completa", "rellena", "llena  ",
 ]
 
 
-def detectar_pdf_solicitado(mensaje: str, historial: list):
+# ── Detectores de intención ───────────────────────────────────────────────────
+
+def detectar_intencion_completar(mensaje: str) -> int | None:
+    """Retorna 13, 17 o None."""
+    msg = mensaje.lower()
+    if not any(v in msg for v in ALIASES_COMPLETAR):
+        return None
+    if any(alias in msg for alias in ALIASES_13):
+        return 13
+    if any(alias in msg for alias in ALIASES_17):
+        return 17
+    return None
+
+
+def detectar_intencion_registrar(mensaje: str) -> bool:
+    """True si el mensaje indica que el usuario quiere registrar un proyecto."""
+    msg = mensaje.lower()
+    return any(alias in msg for alias in ALIASES_REGISTRAR)
+
+
+def detectar_pdf_solicitado(mensaje: str, historial: list) -> list[int]:
     msg = mensaje.lower()
     pide_13 = any(alias in msg for alias in ALIASES_13)
     pide_17 = any(alias in msg for alias in ALIASES_17)
@@ -100,14 +166,14 @@ def detectar_pdf_solicitado(mensaje: str, historial: list):
         r"(fo-in-13|fo-in-17|foin13|foin17|informe de gestion|plan de accion"
         r"|pdf|informe|formulario|documento|plan|el 13|el 17|número 13|número 17"
         r"|numero 13|numero 17)",
-        msg
+        msg,
     )
     es_solicitud_pdf = tiene_verbo and tiene_referencia_pdf
 
     if not pide_13 and not pide_17 and not pide_ambos:
         ultimo_bot = next(
             (h["content"] for h in reversed(historial) if h["role"] == "assistant"),
-            ""
+            "",
         )
         if "FO-IN-13" in ultimo_bot or "FO-IN-17" in ultimo_bot:
             if re.search(r"\b17\b", msg):
@@ -131,11 +197,8 @@ def detectar_pdf_solicitado(mensaje: str, historial: list):
 
 def detectar_docente_solicitado(mensaje: str) -> dict | None:
     """
-    Detecta si el mensaje menciona a un docente específico del GIA (ej. "los
-    proyectos de Ana Gissele", "lo de Puerto"). Compara los tokens del mensaje
-    contra la lista de docentes del /team/ (con CvLAC) y devuelve el que mejor
-    coincida como {"nombre": ..., "cvlac_url": ...}, o None si no se menciona a
-    nadie reconocible (en cuyo caso se usa el docente autenticado).
+    Detecta si el mensaje menciona a un docente específico del GIA.
+    Retorna {"nombre": ..., "cvlac_url": ...} o None.
     """
     msg_norm = _normalizar_nombre(mensaje or "")
     if not msg_norm.strip():
@@ -160,27 +223,24 @@ def detectar_docente_solicitado(mensaje: str) -> dict | None:
             mejor = {"nombre": nombre, "cvlac_url": url}
 
     if mejor:
-        logger.info("Docente solicitado detectado: %s (%d coincidencias)",
-                    mejor["nombre"], mejor_hits)
+        logger.info("Docente solicitado detectado: %s (%d coincidencias)", mejor["nombre"], mejor_hits)
     return mejor
 
+
+# ── Construcción de respuesta con extracción de PDFs ────────────────────────
 
 async def construir_respuesta_con_extraccion(
     pdfs: list,
     docente: dict | None = None,
     docente_objetivo: dict | None = None,
-) -> str:
+) -> tuple[str, list[str]]:
     """
     Construye la respuesta para una solicitud de PDFs.
-
-    FO-IN-17: documento fuente del semestre actual — extrae, persiste y genera PDF.
-    FO-IN-13: documento derivado — usa el FO-IN-17 del semestre anterior como fuente.
-
-    `docente_objetivo` (opcional): docente cuyos proyectos se piden realmente,
-    detectado del mensaje (ej. "los proyectos de Ana Gissele").
+    Retorna (texto_respuesta, lista_fuentes_usadas).
     """
     semestre_actual, _, _ = calcular_periodo()
     partes: list[str] = []
+    fuentes: list[str] = []
     nota_objetivo = (
         f"\n👤 Proyectos atribuidos a: **{docente_objetivo['nombre']}**"
         if docente_objetivo else ""
@@ -193,6 +253,7 @@ async def construir_respuesta_con_extraccion(
             )
             nombre_17 = resultado_17["pdf_nombre"]
             advertencia = resultado_17.get("advertencia", "")
+            fuentes.extend(resultado_17.get("datos", {}).get("fuentes_consultadas", []))
             bloque = (
                 "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
                 f"Semestre: {semestre_actual}{nota_objetivo}\n"
@@ -201,6 +262,8 @@ async def construir_respuesta_con_extraccion(
             if advertencia:
                 bloque += f"\n⚠️ {advertencia}"
             partes.append(bloque)
+            # Registrar reporte generado
+            _guardar_reporte_asinc(docente, "17", semestre_actual, nombre_17, fuentes)
         except Exception as exc:
             partes.append(
                 "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
@@ -220,6 +283,7 @@ async def construir_respuesta_con_extraccion(
                 f"Generado a partir del Plan de Acción (FO-IN-17) del semestre {sem_ref}.{nota_objetivo}\n"
                 f"👉 [Descargar informe (PDF)](/descargar/13/{nombre_13})"
             )
+            _guardar_reporte_asinc(docente, "13", semestre_actual, nombre_13, fuentes)
         except Exception as exc:
             partes.append(
                 "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
@@ -231,17 +295,112 @@ async def construir_respuesta_con_extraccion(
         if len(pdfs) > 1
         else "Aquí tienes el documento solicitado:"
     )
-    return intro + "\n\n" + "\n\n".join(partes)
+    return intro + "\n\n" + "\n\n".join(partes), fuentes
 
+
+def _guardar_reporte_asinc(docente, tipo, semestre, pdf_nombre, fuentes):
+    """Guarda el registro del reporte generado sin bloquear la respuesta."""
+    try:
+        import json
+        from services.rag_service import guardar_reporte
+        docente_id = docente["id"] if docente else None
+        guardar_reporte(
+            docente_id=docente_id,
+            tipo=tipo,
+            semestre=semestre,
+            pdf_path=f"/static/generados/{pdf_nombre}",
+            fuentes_usadas=json.dumps(fuentes, ensure_ascii=False),
+        )
+    except Exception as exc:
+        logger.debug("No se pudo guardar registro de reporte: %s", exc)
+
+
+# ── Flujo de registro de proyecto ────────────────────────────────────────────
+
+def _iniciar_registro_proyecto(session_id: str, docente: dict, semestre_actual: str) -> str:
+    """Configura la sesión para el flujo de registro y devuelve el primer mensaje."""
+    sesiones_activas[session_id]["paso"] = "registrando_proyecto"
+    sesiones_activas[session_id]["campo_actual"] = 0
+    sesiones_activas[session_id]["datos_proyecto"] = {}
+    sesiones_activas[session_id]["semestre_registro"] = semestre_actual
+    primer_campo = _CAMPOS_PROYECTO[0]
+    return (
+        f"📋 Vamos a registrar un nuevo proyecto.\n\n"
+        f"{primer_campo['pregunta']}"
+    )
+
+
+async def _procesar_registro_proyecto(session_id: str, mensaje: str) -> str:
+    """Procesa cada paso del flujo de registro y retorna la respuesta."""
+    estado = sesiones_activas[session_id]
+    idx = estado["campo_actual"]
+    datos = estado["datos_proyecto"]
+    campo_def = _CAMPOS_PROYECTO[idx]
+
+    valor = mensaje.strip()
+    if not valor and campo_def["default"] is not None:
+        # Usar default
+        default = campo_def["default"]
+        if campo_def["clave"] == "periodo" and default is None:
+            default, _, _ = calcular_periodo()
+        valor = default or ""
+    datos[campo_def["clave"]] = valor
+
+    siguiente_idx = idx + 1
+    if siguiente_idx < len(_CAMPOS_PROYECTO):
+        estado["campo_actual"] = siguiente_idx
+        sig = _CAMPOS_PROYECTO[siguiente_idx]
+        return f"✅ Guardado.\n\n{sig['pregunta']}"
+
+    # Todos los campos recolectados → persistir
+    semestre, _, _ = calcular_periodo()
+    periodo = datos.get("periodo") or semestre
+    docente = estado.get("docente")
+    docente_id = docente["id"] if docente else None
+    responsable = datos.get("responsable") or (docente["nombre"] if docente else "")
+
+    try:
+        from services.proyecto_service import registrar_proyecto
+        proyecto = registrar_proyecto(
+            docente_id=docente_id,
+            titulo=datos.get("titulo", "Sin título"),
+            linea=datos.get("linea", "Sistemas Inteligentes Aplicados"),
+            objetivo=datos.get("objetivo", ""),
+            actividades=datos.get("actividades", ""),
+            responsable=responsable,
+            producto=datos.get("producto", ""),
+            periodo=periodo,
+        )
+        # Volver al estado autenticado
+        estado["paso"] = "autenticado"
+        estado.pop("campo_actual", None)
+        estado.pop("datos_proyecto", None)
+        estado.pop("semestre_registro", None)
+
+        return (
+            f"✅ **Proyecto registrado exitosamente** (ID: {proyecto['id']})\n\n"
+            f"📌 **Título:** {proyecto['titulo']}\n"
+            f"🔬 **Línea:** {proyecto['linea'] or '—'}\n"
+            f"📅 **Período:** {proyecto['periodo'] or semestre}\n\n"
+            "El proyecto queda en estado **pendiente de revisión** hasta que un "
+            "docente lo apruebe. Puede consultarlo en `/admin/proyectos/pendientes`."
+        )
+    except Exception as exc:
+        logger.error("Error al registrar proyecto desde chat: %s", exc)
+        estado["paso"] = "autenticado"
+        estado.pop("campo_actual", None)
+        estado.pop("datos_proyecto", None)
+        return f"❌ No se pudo guardar el proyecto: {exc}"
+
+
+# ── Ruta de descarga ─────────────────────────────────────────────────────────
 
 @router.get("/descargar/{tipo}/{filename}")
 async def descargar(tipo: str, filename: str):
     """
-    Sirve un PDF generado con el NOMBRE OFICIAL de descarga.
-
-    El archivo en disco tiene un nombre único interno, pero el navegador lo
-    descargará como 'FO-IN-17 PLAN DE ACCION GRUPOS INV V1.pdf' (o FO-IN-13)
-    gracias al Content-Disposition que fija FileResponse(filename=...).
+    Sirve un PDF generado con el nombre oficial de descarga.
+    El archivo en disco tiene nombre único interno; el navegador lo descarga
+    con el nombre oficial según el Content-Disposition.
     """
     nombre_disco = Path(filename).name  # evita path traversal
     ruta = GENERADOS_DIR / nombre_disco
@@ -255,150 +414,214 @@ async def descargar(tipo: str, filename: str):
     )
 
 
+# ── Endpoint principal de chat ────────────────────────────────────────────────
+
 @router.post("/chat")
 async def chat(data: Message):
+    t_inicio = time.monotonic()
     mensaje = data.message
-    # Usamos el último mensaje del historial como session_id simple
-    # En producción se puede reemplazar por un token real
-    session_id = data.session_id if hasattr(data, "session_id") else "default"
+    session_id = data.session_id if data.session_id else "default"
 
     estado = sesiones_activas.get(session_id)
+    intencion = "chat_normal"
+    fuentes_log: list[str] = []
+    respuesta = ""
+    exito = True
 
-    # ── Flujo de autenticación en curso ──────────────────────────────────────
-    if estado:
-        if estado["paso"] == "esperando_usuario":
+    try:
+        semestre_actual, _, _ = calcular_periodo()
+        autenticado = (
+            estado is not None
+            and estado.get("autenticado")
+            and estado.get("paso") == "autenticado"
+        )
+
+        # ── 1. Flujo de autenticación en curso ─────────────────────────────
+        if estado and estado.get("paso") == "esperando_usuario":
+            intencion = "autenticacion"
             sesiones_activas[session_id]["usuario_ingresado"] = mensaje.strip()
             sesiones_activas[session_id]["paso"] = "esperando_password"
-            return {"reply": "🔐 Ahora ingresa tu contraseña:"}
+            respuesta = "🔐 Ahora ingresa tu contraseña:"
+            return {"reply": respuesta}
 
-        if estado["paso"] == "esperando_password":
+        if estado and estado.get("paso") == "esperando_password":
+            intencion = "autenticacion"
             usuario = estado["usuario_ingresado"]
-            password = mensaje.strip()
-            docente = verificar_credenciales(usuario, password)
+            docente = verificar_credenciales(usuario, mensaje.strip())
 
             if docente:
                 sesiones_activas[session_id]["autenticado"] = True
                 sesiones_activas[session_id]["docente"] = docente
                 sesiones_activas[session_id]["paso"] = "autenticado"
-                pdfs = estado["pdfs_solicitados"]
+
+                flujo_post = estado.get("flujo_post_auth")
+                if flujo_post == "registrar_proyecto":
+                    respuesta = (
+                        f"✅ Bienvenido/a, **{docente['nombre']}**. Acceso verificado.\n\n"
+                        + _iniciar_registro_proyecto(session_id, docente, semestre_actual)
+                    )
+                    intencion = "registrar_proyecto"
+                    return {"reply": respuesta}
+
+                pdfs = estado.get("pdfs_solicitados", [])
                 docente_obj = estado.get("docente_solicitado")
-                respuesta_docs = await construir_respuesta_con_extraccion(pdfs, docente, docente_obj)
-                return {
-                    "reply": f"✅ Bienvenido/a, **{docente['nombre']}**. Acceso verificado.\n\n"
-                             + respuesta_docs
-                }
+                respuesta_docs, fuentes_log = await construir_respuesta_con_extraccion(
+                    pdfs, docente, docente_obj
+                )
+                intencion = f"solicitud_pdf_{pdfs}"
+                respuesta = f"✅ Bienvenido/a, **{docente['nombre']}**. Acceso verificado.\n\n" + respuesta_docs
             else:
-                # Credenciales incorrectas: limpiar sesión
                 del sesiones_activas[session_id]
-                return {
-                    "reply": "❌ Usuario o contraseña incorrectos. "
-                             "Si deseas intentarlo de nuevo, vuelve a solicitar el documento."
+                intencion = "autenticacion_fallida"
+                exito = False
+                respuesta = (
+                    "❌ Usuario o contraseña incorrectos. "
+                    "Si deseas intentarlo de nuevo, vuelve a solicitar el documento o el registro."
+                )
+            return {"reply": respuesta}
+
+        # ── 2. Flujo de registro de proyecto en curso ───────────────────────
+        if estado and estado.get("paso") == "registrando_proyecto":
+            intencion = "registrar_proyecto"
+            respuesta = await _procesar_registro_proyecto(session_id, mensaje)
+            return {"reply": respuesta}
+
+        # ── 3. Flujo de completado de PDF en curso ──────────────────────────
+        if estado and estado.get("paso") == "completando_pdf":
+            intencion = "completar_pdf"
+            campos = estado["campos_pendientes"]
+            idx_actual = estado["campo_actual"]
+
+            campo = campos[idx_actual]
+            estado["datos_recolectados"][campo] = mensaje.strip()
+
+            if idx_actual + 1 < len(campos):
+                estado["campo_actual"] += 1
+                siguiente_campo = campos[estado["campo_actual"]]
+                respuesta = f"Gracias. Ahora, dime el **{siguiente_campo.replace('_', ' ').title()}**:"
+            else:
+                pdf_numero = estado["pdf_numero"]
+                datos = estado["datos_recolectados"]
+                try:
+                    output_path = pdf_completer.completar_pdf(pdf_numero, datos)
+                    nombre_archivo = os.path.basename(output_path)
+                    del sesiones_activas[session_id]
+                    respuesta = (
+                        f"✅ ¡PDF completado exitosamente!\n\n"
+                        f"📄 Descarga tu documento aquí: [Descargar](/download/{nombre_archivo})"
+                    )
+                except Exception as e:
+                    respuesta = f"❌ Ocurrió un error al generar el PDF: {str(e)}"
+                    exito = False
+            return {"reply": respuesta}
+
+        # ── 4. Detección de solicitud de PDFs ──────────────────────────────
+        pdfs_solicitados = detectar_pdf_solicitado(mensaje, data.history)
+        if pdfs_solicitados:
+            intencion = f"solicitud_pdf_{pdfs_solicitados}"
+            docente_solicitado = await asyncio.to_thread(detectar_docente_solicitado, mensaje)
+            if autenticado:
+                respuesta, fuentes_log = await construir_respuesta_con_extraccion(
+                    pdfs_solicitados, estado["docente"], docente_solicitado
+                )
+            else:
+                sesiones_activas[session_id] = {
+                    "paso": "esperando_usuario",
+                    "pdfs_solicitados": pdfs_solicitados,
+                    "docente_solicitado": docente_solicitado,
+                    "flujo_post_auth": None,
+                    "usuario_ingresado": None,
+                    "autenticado": False,
+                    "docente": None,
                 }
+                respuesta = (
+                    "🔒 Para acceder a los documentos del semillero necesito verificar "
+                    "tu identidad.\n\n👤 Por favor ingresa tu **usuario**:"
+                )
+            return {"reply": respuesta}
 
-    # ── Docente ya autenticado en esta sesión ─────────────────────────────────
-    autenticado = (
-        estado is not None and
-        estado.get("autenticado") and
-        estado.get("paso") == "autenticado"
-    )
-
-    # ── Detección de solicitud de PDFs ────────────────────────────────────────
-    pdfs_solicitados = detectar_pdf_solicitado(mensaje, data.history)
-
-    if pdfs_solicitados:
-        # Detectar si se pide un docente específico (Ana, Pardo, Puerto…)
-        docente_solicitado = await asyncio.to_thread(detectar_docente_solicitado, mensaje)
-        if autenticado:
-            # Ya está autenticado, entrega directamente + extracción web
-            return {"reply": await construir_respuesta_con_extraccion(
-                pdfs_solicitados, estado["docente"], docente_solicitado)}
-        else:
-            # Iniciar flujo de autenticación
-            sesiones_activas[session_id] = {
-                "paso": "esperando_usuario",
-                "pdfs_solicitados": pdfs_solicitados,
-                "docente_solicitado": docente_solicitado,
-                "usuario_ingresado": None,
-                "autenticado": False,
-                "docente": None,
-            }
-            return {
-                "reply": "🔒 Para acceder a los documentos del semillero necesito verificar "
-                         "tu identidad.\n\n👤 Por favor ingresa tu **usuario**:"
-            }
-
-    # ── NUEVO: Detectar intención de COMPLETAR PDF ────────────────────────────
-    pdf_a_completar = detectar_intencion_completar(mensaje)
-    
-    if pdf_a_completar:
-        if autenticado:
-            # Iniciar flujo de completado
-            sesiones_activas[session_id] = {
-                "paso": "completando_pdf",
-                "pdf_numero": pdf_a_completar,
-                "datos_recolectados": {},
-                "campo_actual": 0,
-                "campos_pendientes": pdf_completer.PDF_CONFIG[pdf_a_completar]["campos"]
-            }
-            
-            primer_campo = sesiones_activas[session_id]["campos_pendientes"][0]
-            return {
-                "reply": f"📝 Vamos a completar el **{pdf_completer.PDF_CONFIG[pdf_a_completar]['descripcion']}**.\n\n"
-                         f"Por favor, dime el **{primer_campo.replace('_', ' ').title()}**:"
-            }
-        else:
-            # Primero autenticar, luego completar
-            sesiones_activas[session_id] = {
-                "paso": "esperando_usuario",
-                "pdfs_solicitados": [pdf_a_completar],
-                "completar_despues": True,  # Flag para saber que después debe llenar
-                "usuario_ingresado": None,
-                "autenticado": False,
-                "docente": None,
-            }
-            return {
-                "reply": "🔒 Para acceder a los documentos necesito verificar tu identidad.\n\n"
-                         "👤 Por favor ingresa tu **usuario**:"
-            }
-    
-    # ── Flujo de completado de PDF en curso ───────────────────────────────────
-    if estado and estado.get("paso") == "completando_pdf":
-        campos = estado["campos_pendientes"]
-        idx_actual = estado["campo_actual"]
-        
-        # Guardar el dato actual
-        campo = campos[idx_actual]
-        estado["datos_recolectados"][campo] = mensaje.strip()
-        
-        # Avanzar al siguiente campo
-        if idx_actual + 1 < len(campos):
-            estado["campo_actual"] += 1
-            siguiente_campo = campos[estado["campo_actual"]]
-            return {
-                "reply": f"Gracias. Ahora, dime el **{siguiente_campo.replace('_', ' ').title()}**:"
-            }
-        else:
-            # Todos los campos recolectados → generar PDF
-            pdf_numero = estado["pdf_numero"]
-            datos = estado["datos_recolectados"]
-            
-            # Generar el PDF completado
-            try:
-                output_path = pdf_completer.completar_pdf(pdf_numero, datos)
-                nombre_archivo = os.path.basename(output_path)
-                
-                # Limpiar sesión
-                del sesiones_activas[session_id]
-                
-                return {
-                    "reply": f"✅ ¡PDF completado exitosamente!\n\n"
-                             f"📄 Descarga tu documento aquí: [Descargar](/download/{nombre_archivo})"
+        # ── 5. Detección de intención de registrar proyecto ─────────────────
+        if detectar_intencion_registrar(mensaje):
+            intencion = "registrar_proyecto"
+            if autenticado:
+                respuesta = _iniciar_registro_proyecto(
+                    session_id, estado["docente"], semestre_actual
+                )
+            else:
+                sesiones_activas[session_id] = {
+                    "paso": "esperando_usuario",
+                    "pdfs_solicitados": [],
+                    "flujo_post_auth": "registrar_proyecto",
+                    "usuario_ingresado": None,
+                    "autenticado": False,
+                    "docente": None,
                 }
-            except Exception as e:
-                return {
-                    "reply": f"❌ Ocurrió un error al generar el PDF: {str(e)}"
-                }
+                respuesta = (
+                    "🔒 Para registrar un proyecto necesito verificar tu identidad.\n\n"
+                    "👤 Por favor ingresa tu **usuario**:"
+                )
+            return {"reply": respuesta}
 
-    # ── Chat normal: delegar al modelo ────────────────────────────────────────
-    respuesta = generar_respuesta(mensaje, data.history)
-    return {"reply": respuesta}
+        # ── 6. Detección de intención de completar PDF ──────────────────────
+        pdf_a_completar = detectar_intencion_completar(mensaje)
+        if pdf_a_completar:
+            intencion = f"completar_pdf_{pdf_a_completar}"
+            if autenticado:
+                sesiones_activas[session_id]["paso"] = "completando_pdf"
+                sesiones_activas[session_id]["pdf_numero"] = pdf_a_completar
+                sesiones_activas[session_id]["datos_recolectados"] = {}
+                sesiones_activas[session_id]["campo_actual"] = 0
+                sesiones_activas[session_id]["campos_pendientes"] = (
+                    pdf_completer.PDF_CONFIG[pdf_a_completar]["campos"]
+                )
+                primer_campo = sesiones_activas[session_id]["campos_pendientes"][0]
+                respuesta = (
+                    f"📝 Vamos a completar el **{pdf_completer.PDF_CONFIG[pdf_a_completar]['descripcion']}**.\n\n"
+                    f"Por favor, dime el **{primer_campo.replace('_', ' ').title()}**:"
+                )
+            else:
+                sesiones_activas[session_id] = {
+                    "paso": "esperando_usuario",
+                    "pdfs_solicitados": [pdf_a_completar],
+                    "flujo_post_auth": None,
+                    "usuario_ingresado": None,
+                    "autenticado": False,
+                    "docente": None,
+                }
+                respuesta = (
+                    "🔒 Para acceder a los documentos necesito verificar tu identidad.\n\n"
+                    "👤 Por favor ingresa tu **usuario**:"
+                )
+            return {"reply": respuesta}
+
+        # ── 7. Chat normal ──────────────────────────────────────────────────
+        intencion = "chat_normal"
+        respuesta = generar_respuesta(mensaje, data.history, session_id)
+        return {"reply": respuesta}
+
+    except Exception as exc:
+        logger.error("Error en /chat session=%s: %s", session_id, exc)
+        exito = False
+        respuesta = "❌ Ocurrió un error inesperado. Por favor, intenta de nuevo."
+        return {"reply": respuesta}
+
+    finally:
+        tiempo_ms = round((time.monotonic() - t_inicio) * 1000)
+        docente_id = None
+        if estado and estado.get("docente"):
+            docente_id = estado["docente"].get("id")
+        try:
+            from services.log_service import registrar_log
+            import json
+            registrar_log(
+                session_id=session_id,
+                mensaje_usuario=mensaje,
+                respuesta_bot=respuesta,
+                intencion_detectada=str(intencion),
+                fuentes_usadas=json.dumps(fuentes_log, ensure_ascii=False) if fuentes_log else "",
+                tiempo_respuesta_ms=tiempo_ms,
+                exito=exito,
+                docente_id=docente_id,
+            )
+        except Exception as exc_log:
+            logger.debug("No se pudo registrar log: %s", exc_log)
