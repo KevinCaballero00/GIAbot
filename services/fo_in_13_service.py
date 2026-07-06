@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 def obtener_fuente_fo_in_13(
     docente: dict,
     semestre_actual: str | None = None,
-    docente_objetivo: dict | None = None,
 ) -> dict:
     """
     Obtiene los datos fuente del FO-IN-13: el FO-IN-17 más reciente válido.
@@ -75,12 +74,12 @@ def obtener_fuente_fo_in_13(
 
     # 2. No existe ningún FO-IN-17 válido — generar uno nuevo
     logger.info(
-        "FO-IN-13: no hay FO-IN-17 válido en BD, generando para '%s', semestre %s...",
-        (docente_objetivo or docente).get("nombre"), sem_anterior,
+        "FO-IN-13: no hay FO-IN-17 válido en BD, generando semestre %s...",
+        sem_anterior,
     )
-    resultado_17 = generar_fo_in_17(docente, sem_anterior, docente_objetivo=docente_objetivo)
+    resultado_17 = generar_fo_in_17(docente, sem_anterior)
     datos_fuente = resultado_17["datos"]
-    responsable_base = datos_fuente.get("responsable", (docente_objetivo or docente).get("nombre", ""))
+    responsable_base = datos_fuente.get("responsable", "")
     registro_nuevo = resultado_17.get("registro") or {}
     return {
         "datos_fuente": datos_fuente,
@@ -94,7 +93,6 @@ def obtener_fuente_fo_in_13(
 def generar_fo_in_13(
     docente: dict,
     semestre_actual: str | None = None,
-    docente_objetivo: dict | None = None,
     *,
     datos_fuente: dict | None = None,
     sem_referencia: str | None = None,
@@ -119,7 +117,7 @@ def generar_fo_in_13(
       - datos_fuente: dict con proyectos del FO-IN-17 de referencia
     """
     if datos_fuente is None or sem_referencia is None:
-        fuente = obtener_fuente_fo_in_13(docente, semestre_actual, docente_objetivo)
+        fuente = obtener_fuente_fo_in_13(docente, semestre_actual)
         datos_fuente = fuente["datos_fuente"]
         sem_referencia = fuente["sem_referencia"]
         responsable_base = responsable_base or fuente.get("responsable_base", "")

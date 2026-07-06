@@ -91,15 +91,40 @@ def generar_respuesta(mensaje: str, historial: list, session_id: str = "") -> st
             "momento. Por favor, intenta más tarde o contacta al administrador."
         )
 
+    # Resolver menciones de docentes (tolerante a errores de tipeo) para
+    # anclar al docente correcto en el prompt y enriquecer la consulta RAG.
+    consulta_rag = mensaje
+    nota_docente = ""
+    try:
+        from services.docentes_matcher import resolver_docentes
+        coincidencias = resolver_docentes(mensaje)
+        if len(coincidencias) == 1 and not coincidencias[0]["ambiguo"]:
+            docente = coincidencias[0]
+            nota_docente = (
+                f"\nNOTA: el usuario menciona a '{' '.join(docente['tokens'])}', "
+                f"que corresponde al docente '{docente['nombre']}'. "
+                "Usa la información de ese docente.\n"
+            )
+            consulta_rag = f"{mensaje} {docente['nombre']}"
+        elif len(coincidencias) > 1:
+            nombres = ", ".join(d["nombre"] for d in coincidencias)
+            nota_docente = (
+                f"\nNOTA: el nombre mencionado por el usuario es ambiguo entre "
+                f"varios docentes del GIA ({nombres}). Pide aclaración sobre a "
+                "cuál se refiere en vez de asumir.\n"
+            )
+    except Exception as exc:
+        logger.debug("docentes_matcher: no se pudo resolver docentes: %s", exc)
+
     # Recuperar contexto RAG relevante para este mensaje
     contexto_rag = ""
     try:
         from services.rag_service import buscar_contexto_relevante
-        contexto_rag = buscar_contexto_relevante(mensaje, top_k=4)
+        contexto_rag = buscar_contexto_relevante(consulta_rag, top_k=4)
     except Exception as exc:
         logger.debug("RAG: no se pudo recuperar contexto: %s", exc)
 
-    system_prompt = _construir_system_prompt()
+    system_prompt = _construir_system_prompt() + nota_docente
     if contexto_rag:
         system_prompt = system_prompt + "\n" + contexto_rag
 

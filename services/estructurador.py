@@ -28,11 +28,13 @@ _PROMPT = """Eres un asistente que estructura información de investigación aca
 para el formato oficial FO-IN-17 (Plan de Acción de Grupos de Investigación) de la
 Universidad Francisco de Paula Santander.
 
-A continuación recibirás TEXTO CRUDO extraído de perfiles CvLAC y de la página del
-grupo GIA. Tu tarea es identificar los proyectos/líneas de investigación del docente
-indicado y devolverlos como JSON limpio.
+A continuación recibirás TEXTO CRUDO extraído de perfiles CvLAC de varios docentes
+del grupo GIA. El texto trae los proyectos agrupados en bloques, cada uno precedido
+por una línea "Docente: <nombre>" que indica a quién pertenece ese bloque. Tu tarea
+es identificar los proyectos de investigación MÁS RECIENTES del grupo (no de un solo
+docente) y devolverlos como JSON limpio.
 
-Docente responsable de los proyectos: "{responsable}"
+Periodo académico actual: "{periodo_actual}"
 
 Devuelve EXCLUSIVAMENTE un arreglo JSON (sin texto adicional) con MÁXIMO {max_lineas}
 objetos. Cada objeto debe tener exactamente estas claves:
@@ -44,17 +46,28 @@ objetos. Cada objeto debe tener exactamente estas claves:
     objetivo y descripción del proyecto (p. ej. "Revisión de literatura", "Diseño
     metodológico", "Recolección y análisis de datos", "Redacción de artículo"). No
     dejes este campo como lista vacía si hay información del proyecto disponible.
-  - "responsable": nombre del responsable del proyecto (usa "{responsable}" si el texto lo confirma).
+  - "responsable": nombre EXACTO del docente indicado en el "Docente:" del bloque de
+    origen de ese proyecto. No inventes ni asumas un responsable distinto al del bloque.
   - "producto": producto esperado (ponencia, artículo, software, prototipo, etc.).
     Si no aparece explícitamente, infiere el producto académico más probable según
     el tipo de proyecto. No dejes vacío si hay descripción del proyecto.
+  - "periodo": el rango o año del proyecto tal como aparece en el texto (ej. "2025 -",
+    "2024 - 2026"). Cadena vacía "" si no hay fecha visible.
+
+Selección de proyectos:
+  - Prioriza los proyectos más recientes: cuyo rango de fechas incluya el año de
+    "{periodo_actual}" o esté abierto (sin fecha de fin).
+  - Si no hay suficientes proyectos vigentes para llenar los {max_lineas} cupos,
+    completa con los del año inmediatamente anterior.
+  - Ordena el resultado del proyecto más reciente al más antiguo.
+  - Diversidad: si hay más candidatos que cupos, no incluyas más de 2 proyectos del
+    mismo docente para que el plan grupal represente a varios docentes.
 
 Reglas estrictas:
   - NO inventes títulos de proyecto, objetivos ni nombre de responsable; si no
     aparecen en el texto déjalos como cadena vacía "".
   - Para "actividades" y "producto" sí puedes deducir a partir del objetivo/descripción.
   - Agrupa información que pertenezca al mismo proyecto; no dupliques líneas.
-  - Prioriza proyectos atribuibles a "{responsable}".
   - Si no hay proyectos identificables, devuelve un arreglo vacío [].
 
 TEXTO CRUDO:
@@ -66,25 +79,26 @@ TEXTO CRUDO:
 
 def estructurar_proyectos(
     texto_crudo: str,
-    responsable: str,
+    periodo_actual: str,
     max_lineas: int = 6,
 ) -> list[dict]:
     """
-    Estructura el texto crudo en una lista de líneas de investigación limpias.
+    Estructura el texto crudo (multi-docente) en una lista grupal de líneas de
+    investigación limpias.
 
     Retorna una lista de dicts con claves: linea, proyecto, objetivo,
-    actividades (list[str]), responsable, producto. Devuelve [] si Gemini falla
-    o no encuentra proyectos (el llamador decide el fallback).
+    actividades (list[str]), responsable, producto, periodo. Devuelve [] si Gemini
+    falla o no encuentra proyectos (el llamador decide el fallback).
     """
     texto = (texto_crudo or "").strip()
     if not texto:
         return []
 
     # Acotar el texto para no exceder límites del modelo
-    texto = texto[:18000]
+    texto = texto[:40000]
 
     prompt = _PROMPT.format(
-        responsable=responsable or "Docente del GIA",
+        periodo_actual=periodo_actual or "",
         max_lineas=max_lineas,
         texto=texto,
     )
@@ -119,9 +133,10 @@ def estructurar_proyectos(
             "proyecto": str(item.get("proyecto") or "").strip(),
             "objetivo": str(item.get("objetivo") or "").strip(),
             "actividades": [str(a).strip() for a in actividades if str(a).strip()],
-            "responsable": str(item.get("responsable") or responsable or "").strip(),
+            "responsable": str(item.get("responsable") or "").strip(),
             "producto": str(item.get("producto") or "").strip(),
+            "periodo": str(item.get("periodo") or "").strip(),
         })
 
-    logger.info("Estructurador: %d líneas estructuradas para '%s'", len(proyectos), responsable)
+    logger.info("Estructurador: %d líneas estructuradas (grupal, periodo '%s')", len(proyectos), periodo_actual)
     return proyectos

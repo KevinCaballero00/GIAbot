@@ -124,7 +124,7 @@ footer ul li a:hover { color: var(--acento); }
 
 /* BOTÓN FLOTANTE */
 #chat-toggle {
-  position: fixed; bottom: 28px; right: 28px; z-index: 999;
+  position: fixed; bottom: 28px; right: 104px; z-index: 999;
   width: 60px; height: 60px; border-radius: 50%;
   background: linear-gradient(135deg, var(--rojo-medio), var(--acento));
   border: none; cursor: pointer; font-size: 26px;
@@ -146,7 +146,7 @@ footer ul li a:hover { color: var(--acento); }
 
 /* VENTANA CHAT */
 #chat-window {
-  position: fixed; bottom: 96px; right: 24px; z-index: 998;
+  position: fixed; bottom: 96px; right: 100px; z-index: 998;
   width: 340px; height: 460px;
   background: white; border-radius: 20px;
   box-shadow: 0 20px 60px rgba(0,0,0,0.2);

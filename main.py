@@ -27,7 +27,7 @@ app = FastAPI(title="GIAbot API", version="2.0.0")
 
 async def _job_refresco_fo_in_17() -> None:
     """
-    Verifica cada 24 horas si algún registro FO-IN-17 supera los 15 días
+    Verifica cada 24 horas si el registro FO-IN-17 grupal supera los 15 días
     sin refresco y lo actualiza. Los errores se registran sin borrar la
     última versión válida.
     """
@@ -35,9 +35,9 @@ async def _job_refresco_fo_in_17() -> None:
     while True:
         await asyncio.sleep(INTERVALO_SEGUNDOS)
         try:
-            from services.fo_in_17_service import refrescar_todos
-            logger.info("Job periódico: verificando registros FO-IN-17 para refresco...")
-            resultados = await asyncio.to_thread(refrescar_todos)
+            from services.fo_in_17_service import refrescar_grupal
+            logger.info("Job periódico: verificando registro FO-IN-17 grupal para refresco...")
+            resultados = await asyncio.to_thread(refrescar_grupal)
             if resultados:
                 logger.info("Job periódico: %d registros FO-IN-17 procesados", len(resultados))
         except Exception as exc:

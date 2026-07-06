@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from models.database import get_connection, get_cursor
-from services.extractor_proyectos import calcular_periodo, extraer_proyectos
+from services.extractor_proyectos import RESPONSABLE_GRUPAL, calcular_periodo, extraer_proyectos
 from services.pdf_fo_in_17 import generar_pdf_fo_in_17_plantilla
 
 logger = logging.getLogger(__name__)
@@ -75,8 +75,8 @@ def obtener_registro_por_responsable(responsable_nombre: str, semestre: str) -> 
 
 def obtener_ultimo_fo_in_17_valido() -> dict | None:
     """
-    Retorna el registro FO-IN-17 más reciente con estado='ok', sin importar
-    de qué docente ni de qué semestre. Es la fuente canónica que usa el FO-IN-13.
+    Retorna el registro FO-IN-17 grupal más reciente con estado='ok'. Es la
+    fuente canónica que usa el FO-IN-13.
 
     El dict incluye `generado_por_nombre` (nombre del docente que lo solicitó)
     obtenido por JOIN con la tabla docentes.
@@ -89,10 +89,11 @@ def obtener_ultimo_fo_in_17_valido() -> dict | None:
             SELECT f.*, d.nombre AS generado_por_nombre
             FROM fo_in_17 f
             LEFT JOIN docentes d ON d.id = f.generado_por_docente_id
-            WHERE f.estado = 'ok'
+            WHERE f.estado = 'ok' AND f.responsable_nombre = %s
             ORDER BY COALESCE(f.fecha_refresco, f.fecha_creacion) DESC
             LIMIT 1
-            """
+            """,
+            (RESPONSABLE_GRUPAL,),
         )
         row = cur.fetchone()
         return dict(row) if row else None
@@ -165,17 +166,16 @@ def _guardar_registro(
 def generar_fo_in_17(
     docente: dict,
     semestre: str | None = None,
-    docente_objetivo: dict | None = None,
 ) -> dict:
     """
-    Genera o refresca el FO-IN-17 para el semestre indicado.
+    Genera o refresca el FO-IN-17 grupal (todo el GIA) para el semestre indicado.
 
-    `docente` es el docente autenticado (quién pide el documento).
-    `docente_objetivo` (opcional) es la persona cuyos proyectos se documentan.
-    Si se omite, el docente autenticado es también el responsable del documento.
+    `docente` es el docente autenticado que solicita el documento (se persiste
+    como `generado_por_docente_id`); el responsable del documento es siempre
+    el grupo GIA, no una persona.
 
-    La caché se busca por (responsable_nombre, semestre), de modo que un
-    registro de Ana no sobreescribe el de Fredy ni viceversa.
+    La caché se busca por (responsable_nombre="GIA", semestre), con el mismo
+    índice único que ya existía para el modo por-docente.
 
     Retorna dict con:
       - pdf_nombre: nombre del archivo PDF
@@ -188,11 +188,8 @@ def generar_fo_in_17(
         semestre, _, _ = calcular_periodo()
 
     docente_id: int = docente["id"]
-    objetivo = docente_objetivo or docente
-    responsable_nombre: str = objetivo.get("nombre", "")
-    responsable_cvlac_url: str | None = (
-        docente_objetivo.get("cvlac_url") if docente_objetivo else None
-    )
+    responsable_nombre: str = RESPONSABLE_GRUPAL
+    responsable_cvlac_url: str | None = None
 
     registro = obtener_registro_por_responsable(responsable_nombre, semestre)
     if (
@@ -219,7 +216,7 @@ def generar_fo_in_17(
         semestre,
     )
     try:
-        resultado = extraer_proyectos(docente, docente_objetivo=docente_objetivo)
+        resultado = extraer_proyectos(docente)
         resultado["semestre_destino"] = semestre
 
         datos_para_guardar = {k: v for k, v in resultado.items() if not k.startswith("_")}
@@ -286,34 +283,38 @@ def generar_fo_in_17(
         raise
 
 
-def refrescar_todos(semestre: str | None = None) -> list[dict]:
+def refrescar_grupal(semestre: str | None = None) -> list[dict]:
     """
-    Refresca los registros FO-IN-17 propios de cada docente cuando llevan
-    más de INTERVALO_REFRESCO_DIAS días sin actualizar.
+    Refresca el registro FO-IN-17 grupal si lleva más de INTERVALO_REFRESCO_DIAS
+    días sin actualizar. No hace nada si ya está vigente.
+
+    El campo `docente_id` de la tabla es NOT NULL, así que se usa el primer
+    docente registrado (por id) como `generado_por` del refresco automático.
     """
     if semestre is None:
         semestre, _, _ = calcular_periodo()
 
+    registro = obtener_registro_por_responsable(RESPONSABLE_GRUPAL, semestre)
+    if registro and not _necesita_refresco(registro.get("fecha_refresco")):
+        return [{"responsable": RESPONSABLE_GRUPAL, "estado": "vigente"}]
+
     conn = get_connection()
     cur = get_cursor(conn)
     try:
-        cur.execute("SELECT * FROM docentes")
-        docentes = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT * FROM docentes ORDER BY id LIMIT 1")
+        row = cur.fetchone()
+        generado_por = dict(row) if row else None
     finally:
         cur.close()
         conn.close()
 
-    resultados: list[dict] = []
-    for docente in docentes:
-        # Cada docente es responsable de su propio registro cuando no hay objetivo externo
-        registro = obtener_registro_por_responsable(docente["nombre"], semestre)
-        if registro and not _necesita_refresco(registro.get("fecha_refresco")):
-            continue
-        try:
-            res = generar_fo_in_17(docente, semestre)
-            resultados.append({"docente": docente["nombre"], "estado": "ok",
-                                "pdf_nombre": res.get("pdf_nombre")})
-        except Exception as exc:
-            resultados.append({"docente": docente["nombre"], "estado": "error", "error": str(exc)})
+    if not generado_por:
+        return [{"responsable": RESPONSABLE_GRUPAL, "estado": "error",
+                  "error": "No hay docentes registrados para generar el FO-IN-17"}]
 
-    return resultados
+    try:
+        res = generar_fo_in_17(generado_por, semestre)
+        return [{"responsable": RESPONSABLE_GRUPAL, "estado": "ok",
+                  "pdf_nombre": res.get("pdf_nombre")}]
+    except Exception as exc:
+        return [{"responsable": RESPONSABLE_GRUPAL, "estado": "error", "error": str(exc)}]

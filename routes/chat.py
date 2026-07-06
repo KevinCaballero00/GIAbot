@@ -31,11 +31,7 @@ from models.message import Message
 from services.ai_service import generar_respuesta
 from services.auth_service import verificar_credenciales
 from services.complete_pdf import pdf_completer
-from services.extractor_proyectos import (
-    calcular_periodo,
-    _obtener_docentes_cvlac,
-    _normalizar_nombre,
-)
+from services.extractor_proyectos import RESPONSABLE_GRUPAL, calcular_periodo
 from services.fo_in_13_service import generar_fo_in_13, obtener_fuente_fo_in_13
 from services.fo_in_17_service import generar_fo_in_17
 from services.pdf_fo_in_13 import proyectos_validos
@@ -49,15 +45,7 @@ router = APIRouter()
 GENERADOS_DIR = Path(__file__).resolve().parent.parent / "static" / "generados"
 NOMBRES_OFICIALES = {
     "13": "FO-IN-13 INFORME GESTION GRUPOS INV V1.pdf",
-    "17": "FO-IN-17 PLAN DE ACCION GRUPOS INV V1.pdf",
-}
-
-# Palabras a ignorar al detectar el nombre de un docente en el mensaje
-_STOPWORDS_NOMBRE = {
-    "de", "del", "la", "el", "los", "las", "grupo", "gia", "docente", "profe",
-    "profesor", "profesora", "investigador", "investigadora", "proyectos",
-    "proyecto", "informe", "plan", "accion", "gestion", "para", "con", "que",
-    "trabajados", "trabajado", "por", "una", "uno",
+    "17": "FO-IN-17 PLAN DE ACCION GRUPOS INV.pdf",
 }
 
 # ── Sesiones activas en memoria { session_id: {docente, estado} } ─────────────
@@ -254,69 +242,29 @@ def detectar_pdf_solicitado(mensaje: str, historial: list) -> list[int]:
     return []
 
 
-def detectar_docente_solicitado(mensaje: str) -> dict | None:
-    """
-    Detecta si el mensaje menciona a un docente específico del GIA.
-    Retorna {"nombre": ..., "cvlac_url": ...} o None.
-    """
-    msg_norm = _normalizar_nombre(mensaje or "")
-    if not msg_norm.strip():
-        return None
-
-    try:
-        team = _obtener_docentes_cvlac()
-    except Exception as exc:
-        logger.warning("No se pudo obtener la lista de docentes para detección: %s", exc)
-        return None
-
-    mejor: dict | None = None
-    mejor_hits = 0
-    for nombre, url in team:
-        tokens = {
-            t for t in _normalizar_nombre(nombre).split()
-            if len(t) >= 3 and t not in _STOPWORDS_NOMBRE
-        }
-        hits = sum(1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", msg_norm))
-        if hits > mejor_hits:
-            mejor_hits = hits
-            mejor = {"nombre": nombre, "cvlac_url": url}
-
-    if mejor:
-        logger.info("Docente solicitado detectado: %s (%d coincidencias)", mejor["nombre"], mejor_hits)
-    return mejor
-
-
 # ── Construcción de respuesta con extracción de PDFs ────────────────────────
-
-def _nota_objetivo(docente_objetivo: dict | None) -> str:
-    return (
-        f"\n👤 Proyectos atribuidos a: **{docente_objetivo['nombre']}**"
-        if docente_objetivo else ""
-    )
-
 
 async def _bloque_fo_in_17(
     docente: dict | None,
-    docente_objetivo: dict | None,
     semestre_actual: str,
 ) -> tuple[str, list[str]]:
     """Genera el FO-IN-17 y devuelve (bloque_markdown, fuentes)."""
     fuentes: list[str] = []
     try:
         resultado_17 = await asyncio.to_thread(
-            generar_fo_in_17, docente, semestre_actual, docente_objetivo
+            generar_fo_in_17, docente, semestre_actual
         )
         nombre_17 = resultado_17["pdf_nombre"]
         advertencia = resultado_17.get("advertencia", "")
         fuentes.extend(resultado_17.get("datos", {}).get("fuentes_consultadas", []))
         bloque = (
             "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
-            f"Semestre: {semestre_actual}{_nota_objetivo(docente_objetivo)}\n"
+            f"Semestre: {semestre_actual}\n"
             f"👉 [Descargar informe (PDF)](/descargar/17/{nombre_17})"
         )
         if advertencia:
             bloque += f"\n⚠️ {advertencia}"
-        _guardar_reporte_asinc(docente, "17", semestre_actual, nombre_17, fuentes, docente_objetivo)
+        _guardar_reporte_asinc(docente, "17", semestre_actual, nombre_17, fuentes, RESPONSABLE_GRUPAL)
         return bloque, fuentes
     except Exception as exc:
         return (
@@ -329,7 +277,6 @@ async def _bloque_fo_in_17(
 
 async def _bloque_fo_in_13(
     docente: dict | None,
-    docente_objetivo: dict | None,
     semestre_actual: str,
     datos_fuente: dict | None = None,
     sem_referencia: str | None = None,
@@ -340,7 +287,7 @@ async def _bloque_fo_in_13(
     try:
         resultado_13 = await asyncio.to_thread(
             lambda: generar_fo_in_13(
-                docente, semestre_actual, docente_objetivo,
+                docente, semestre_actual,
                 datos_fuente=datos_fuente, sem_referencia=sem_referencia,
                 responsable_base=responsable_base,
                 cumplimientos=cumplimientos,
@@ -349,13 +296,11 @@ async def _bloque_fo_in_13(
         nombre_13 = resultado_13["pdf_nombre"]
         sem_ref = resultado_13["semestre_referencia"]
         responsable_base = resultado_13.get("responsable_base", "")
-        _guardar_reporte_asinc(docente, "13", semestre_actual, nombre_13, [],
-                               docente_objetivo or ({"nombre": responsable_base} if responsable_base else None))
+        _guardar_reporte_asinc(docente, "13", semestre_actual, nombre_13, [], responsable_base or None)
         nota_fuente = f" — basado en datos de **{responsable_base}**" if responsable_base else ""
         return (
             "📄 **FO-IN-13 – Informe de Gestión de Grupos de Investigación**\n"
-            f"Generado a partir del FO-IN-17 del semestre {sem_ref}{nota_fuente}."
-            f"{_nota_objetivo(docente_objetivo)}\n"
+            f"Generado a partir del FO-IN-17 del semestre {sem_ref}{nota_fuente}.\n"
             f"👉 [Descargar informe (PDF)](/descargar/13/{nombre_13})"
         )
     except Exception as exc:
@@ -378,7 +323,6 @@ async def iniciar_entrega_pdfs(
     session_id: str,
     pdfs: list,
     docente: dict | None,
-    docente_objetivo: dict | None,
 ) -> tuple[str, list[str]]:
     """
     Orquesta la entrega de los PDFs solicitados.
@@ -397,14 +341,14 @@ async def iniciar_entrega_pdfs(
     inicio_preguntas = False
 
     if 17 in pdfs:
-        bloque_17, fuentes_17 = await _bloque_fo_in_17(docente, docente_objetivo, semestre_actual)
+        bloque_17, fuentes_17 = await _bloque_fo_in_17(docente, semestre_actual)
         partes.append(bloque_17)
         fuentes.extend(fuentes_17)
 
     if 13 in pdfs:
         try:
             fuente = await asyncio.to_thread(
-                obtener_fuente_fo_in_13, docente, semestre_actual, docente_objetivo
+                obtener_fuente_fo_in_13, docente, semestre_actual
             )
             datos_fuente = fuente["datos_fuente"]
             sem_ref = fuente["sem_referencia"]
@@ -432,7 +376,6 @@ async def iniciar_entrega_pdfs(
                 "confirmacion_datos_fuente": datos_fuente,
                 "confirmacion_sem_referencia": sem_ref,
                 "confirmacion_responsable_base": responsable_base,
-                "confirmacion_docente_objetivo": docente_objetivo,
             })
             lineas_info: list[str] = []
             if responsable_base:
@@ -466,7 +409,6 @@ async def iniciar_entrega_pdfs(
 async def _continuar_generacion_fo_in_13(
     session_id: str,
     docente: dict | None,
-    docente_objetivo: dict | None,
     datos_fuente: dict,
     sem_ref: str,
     responsable_base: str,
@@ -490,7 +432,6 @@ async def _continuar_generacion_fo_in_13(
             "cumpl_datos_fuente": datos_fuente,
             "cumpl_sem_referencia": sem_ref,
             "cumpl_responsable_base": responsable_base,
-            "cumpl_docente_objetivo": docente_objetivo,
         })
         return (
             f"Para generar el **FO-IN-13** necesito el porcentaje de cumplimiento "
@@ -500,7 +441,7 @@ async def _continuar_generacion_fo_in_13(
         )
 
     return await _bloque_fo_in_13(
-        docente, docente_objetivo, semestre_actual,
+        docente, semestre_actual,
         datos_fuente=datos_fuente, sem_referencia=sem_ref,
         responsable_base=responsable_base, cumplimientos={},
     )
@@ -518,7 +459,7 @@ async def _procesar_confirmacion_fo_in_13(session_id: str, mensaje: str) -> str:
         estado["paso"] = "autenticado"
         for clave in (
             "confirmacion_datos_fuente", "confirmacion_sem_referencia",
-            "confirmacion_responsable_base", "confirmacion_docente_objetivo",
+            "confirmacion_responsable_base",
         ):
             estado.pop(clave, None)
         return (
@@ -530,12 +471,11 @@ async def _procesar_confirmacion_fo_in_13(session_id: str, mensaje: str) -> str:
         datos_fuente = estado.pop("confirmacion_datos_fuente", {})
         sem_ref = estado.pop("confirmacion_sem_referencia", "")
         responsable_base = estado.pop("confirmacion_responsable_base", "")
-        docente_objetivo = estado.pop("confirmacion_docente_objetivo", None)
         docente = estado.get("docente")
         estado["paso"] = "autenticado"
 
         return await _continuar_generacion_fo_in_13(
-            session_id, docente, docente_objetivo,
+            session_id, docente,
             datos_fuente, sem_ref, responsable_base, semestre_actual,
         )
 
@@ -574,7 +514,6 @@ async def _procesar_cumplimiento(session_id: str, mensaje: str) -> str:
     docente = estado.get("docente")
     bloque = await _bloque_fo_in_13(
         docente,
-        estado.get("cumpl_docente_objetivo"),
         semestre_actual,
         datos_fuente=estado.get("cumpl_datos_fuente"),
         sem_referencia=estado.get("cumpl_sem_referencia"),
@@ -587,23 +526,19 @@ async def _procesar_cumplimiento(session_id: str, mensaje: str) -> str:
     for clave in (
         "cumpl_proyectos", "cumpl_idx", "cumpl_valores",
         "cumpl_datos_fuente", "cumpl_sem_referencia", "cumpl_responsable_base",
-        "cumpl_docente_objetivo",
     ):
         estado.pop(clave, None)
 
     return "✅ ¡Listo! Generé tu informe con los porcentajes indicados.\n\n" + bloque
 
 
-def _guardar_reporte_asinc(docente, tipo, semestre, pdf_nombre, fuentes, docente_objetivo=None):
+def _guardar_reporte_asinc(docente, tipo, semestre, pdf_nombre, fuentes, responsable_nombre=None):
     """Guarda el registro del reporte generado sin bloquear la respuesta."""
     try:
         import json
         from services.rag_service import guardar_reporte
         docente_id = docente["id"] if docente else None
-        responsable_nombre = (
-            docente_objetivo["nombre"] if docente_objetivo
-            else (docente["nombre"] if docente else None)
-        )
+        responsable_nombre = responsable_nombre or (docente["nombre"] if docente else None)
         guardar_reporte(
             docente_id=docente_id,
             tipo=tipo,
@@ -766,9 +701,8 @@ async def chat(data: Message):
                     return {"reply": respuesta}
 
                 pdfs = estado.get("pdfs_solicitados", [])
-                docente_obj = estado.get("docente_solicitado")
                 respuesta_docs, fuentes_log = await iniciar_entrega_pdfs(
-                    session_id, pdfs, docente, docente_obj
+                    session_id, pdfs, docente
                 )
                 intencion = f"solicitud_pdf_{pdfs}"
                 respuesta = f"✅ Bienvenido/a, **{docente['nombre']}**. Acceso verificado.\n\n" + respuesta_docs
@@ -833,16 +767,14 @@ async def chat(data: Message):
         pdfs_solicitados = detectar_pdf_solicitado(mensaje, data.history)
         if pdfs_solicitados:
             intencion = f"solicitud_pdf_{pdfs_solicitados}"
-            docente_solicitado = await asyncio.to_thread(detectar_docente_solicitado, mensaje)
             if autenticado:
                 respuesta, fuentes_log = await iniciar_entrega_pdfs(
-                    session_id, pdfs_solicitados, estado["docente"], docente_solicitado
+                    session_id, pdfs_solicitados, estado["docente"]
                 )
             else:
                 sesiones_activas[session_id] = {
                     "paso": "esperando_usuario",
                     "pdfs_solicitados": pdfs_solicitados,
-                    "docente_solicitado": docente_solicitado,
                     "flujo_post_auth": None,
                     "usuario_ingresado": None,
                     "autenticado": False,

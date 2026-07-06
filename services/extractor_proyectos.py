@@ -18,7 +18,7 @@ import json
 import logging
 import re
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -35,6 +35,8 @@ from services.estructurador import estructurar_proyectos
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "static" / "extracciones"
+
+RESPONSABLE_GRUPAL = "GIA"
 
 KW_PROYECTOS = {
     "proyectos de investigación",
@@ -275,23 +277,21 @@ def _normalizar_nombre(nombre: str) -> str:
     return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 
-def _nombre_coincide(nombre_db: str, nombre_web: str) -> bool:
-    palabras_db = set(_normalizar_nombre(nombre_db).split())
-    palabras_web = set(_normalizar_nombre(nombre_web).split())
-    return len(palabras_db & palabras_web) >= 2
-
-
 def _construir_texto_crudo(entradas: list[dict]) -> str:
     """Concatena título + descripción de las entradas crudas en un solo blob de texto
-    para alimentar al estructurador LLM."""
+    para alimentar al estructurador LLM. Cada bloque indica el docente de origen para
+    que el estructurador pueda atribuir cada proyecto correctamente."""
+    presupuesto_por_docente = 3500
     partes: list[str] = []
     for e in entradas:
         if e.get("error"):
             continue
         titulo = (e.get("proyecto") or "").strip()
-        desc = (e.get("descripcion") or "").strip()
+        desc = (e.get("descripcion") or "").strip()[:presupuesto_por_docente]
         fuente = (e.get("fuente") or "").strip()
+        docente = (e.get("docente") or "").strip()
         bloque = "\n".join(p for p in [
+            f"Docente: {docente}" if docente else "",
             f"[Fuente: {fuente}]" if fuente else "",
             f"Título: {titulo}" if titulo else "",
             desc,
@@ -301,21 +301,31 @@ def _construir_texto_crudo(entradas: list[dict]) -> str:
     return "\n\n".join(partes)
 
 
-def _fallback_crudo_a_limpio(entradas: list[dict], responsable: str, max_lineas: int = 6) -> list[dict]:
+def _fallback_crudo_a_limpio(entradas: list[dict], max_lineas: int = 6) -> list[dict]:
     """Si el estructurador LLM no devuelve nada, mapea las entradas crudas al esquema
-    limpio de forma mínima para no dejar el PDF vacío."""
+    limpio de forma mínima para no dejar el PDF vacío. Ordena por año detectado
+    descendente antes de recortar a `max_lineas`."""
+    candidatas = [e for e in entradas if not e.get("error") and e.get("proyecto")]
+
+    def _anio(e: dict) -> int:
+        m = PERIODO_RE.search(e.get("periodo") or "")
+        if not m:
+            return 0
+        return int(re.search(r"20\d{2}", m.group(0)).group(0))
+
+    candidatas.sort(key=_anio, reverse=True)
+
     limpios: list[dict] = []
-    for e in entradas:
-        if e.get("error") or not e.get("proyecto"):
-            continue
+    for e in candidatas:
         titulo = (e.get("proyecto") or "").strip()
         limpios.append({
             "linea": "Sistemas Inteligentes Aplicados",
             "proyecto": titulo[:200] + ("..." if len(titulo) > 200 else ""),
             "objetivo": (e.get("descripcion") or "")[:180],
             "actividades": [],
-            "responsable": responsable or (e.get("docente") or ""),
+            "responsable": e.get("docente") or "",
             "producto": "",
+            "periodo": e.get("periodo") or "",
         })
         if len(limpios) >= max_lineas:
             break
@@ -324,40 +334,30 @@ def _fallback_crudo_a_limpio(entradas: list[dict], responsable: str, max_lineas:
 
 # ────────────────────────────── orquestador ──────────────────────────────────
 
-def extraer_proyectos(
-    docente: dict | None = None,
-    docente_objetivo: dict | None = None,
-) -> dict:
+def extraer_proyectos(docente: dict | None = None) -> dict:
     """
-    Extrae proyectos de todas las fuentes, los estructura con Gemini y retorna el dict.
+    Extrae proyectos de todas las fuentes (todos los docentes del /team/), los
+    estructura con Gemini en modo grupal y retorna el dict.
 
-    `docente` es el docente autenticado (se persiste en BD y sirve de fallback).
-    `docente_objetivo` (opcional) es el docente cuyos proyectos se piden realmente
-    (ej. el usuario autenticado como Fredy pide "los proyectos de Ana Gissele").
-    Lleva al menos {"nombre": ...} y, opcionalmente, {"cvlac_url": ...}. El filtrado
-    del CvLAC y la atribución de cada línea se hacen sobre este nombre.
+    `docente` es el docente autenticado que dispara la extracción (se persiste en
+    BD como `generado_por`, no filtra ni limita las fuentes consultadas).
 
     El dict retornado incluye:
       - docente: datos del docente autenticado (o None)
-      - responsable: nombre usado para filtrar/atribuir los proyectos
+      - responsable: "GIA" (el plan de acción es del grupo, no de una persona)
       - periodo: período académico calculado (ej. "2026-1")
       - proyectos: lista de líneas de investigación ya estructuradas (máx. 6)
       - fuentes_consultadas / errores / fecha_extraccion / duracion_segundos
       - _proyectos_crudos: entradas crudas de respaldo (no se persiste en BD)
       - _ruta_archivo / _nombre_archivo: ruta del JSON generado
     """
-    logger.info("Extractor: iniciando extracción de proyectos...")
+    logger.info("Extractor: iniciando extracción grupal de proyectos...")
     inicio = datetime.utcnow()
     todas: list[dict] = []
     errores: list[str] = []
     fuentes_consultadas: list[str] = []
 
     periodo, _, _ = calcular_periodo()
-
-    # Nombre y CvLAC a usar para filtrar/atribuir (objetivo tiene prioridad)
-    objetivo = docente_objetivo or docente
-    nombre_filtro = objetivo.get("nombre") if objetivo else None
-    cvlac_directo = docente_objetivo.get("cvlac_url") if docente_objetivo else None
 
     # 1. Página institucional /proyectos/
     fuentes_consultadas.append("GIA Web – /proyectos/")
@@ -370,24 +370,8 @@ def extraer_proyectos(
         logger.warning("Extractor: fallo – %s", msg)
         errores.append(msg)
 
-    # 2. Perfiles CvLAC (filtrados al docente objetivo si se proporcionó)
-    if cvlac_directo and nombre_filtro:
-        docentes_cvlac = [(nombre_filtro, cvlac_directo)]
-        logger.info("Extractor: usando CvLAC directo de '%s'", nombre_filtro)
-    else:
-        todos_cvlac = _obtener_docentes_cvlac()
-        if nombre_filtro:
-            docentes_cvlac = [
-                (n, u) for n, u in todos_cvlac
-                if _nombre_coincide(nombre_filtro, n)
-            ]
-            logger.info(
-                "Extractor: filtrando CvLAC para '%s' – %d coincidencias",
-                nombre_filtro, len(docentes_cvlac),
-            )
-        else:
-            docentes_cvlac = todos_cvlac
-
+    # 2. Perfiles CvLAC de todos los docentes del /team/
+    docentes_cvlac = _obtener_docentes_cvlac()
     logger.info("Extractor: %d docentes con CvLAC a consultar", len(docentes_cvlac))
 
     if docentes_cvlac:
@@ -399,33 +383,39 @@ def extraer_proyectos(
                 ex.submit(_extraer_proyectos_cvlac, nombre, url): nombre
                 for nombre, url in docentes_cvlac
             }
-            for futuro in as_completed(futuros, timeout=90):
-                nombre = futuros[futuro]
-                try:
-                    entradas = futuro.result()
-                    todas.extend(entradas)
-                    logger.info(
-                        "Extractor: %d entradas desde CvLAC de %s",
-                        len(entradas), nombre,
-                    )
-                except Exception as exc:
-                    msg = f"CvLAC de {nombre}: {exc}"
-                    logger.warning("Extractor: fallo – %s", msg)
-                    errores.append(msg)
+            try:
+                for futuro in as_completed(futuros, timeout=120):
+                    nombre = futuros[futuro]
+                    try:
+                        entradas = futuro.result()
+                        todas.extend(entradas)
+                        logger.info(
+                            "Extractor: %d entradas desde CvLAC de %s",
+                            len(entradas), nombre,
+                        )
+                    except Exception as exc:
+                        msg = f"CvLAC de {nombre}: {exc}"
+                        logger.warning("Extractor: fallo – %s", msg)
+                        errores.append(msg)
+            except TimeoutError:
+                pendientes = [futuros[f] for f in futuros if not f.done()]
+                msg = f"Timeout esperando CvLAC de: {', '.join(pendientes)}"
+                logger.warning("Extractor: %s", msg)
+                errores.append(msg)
 
     # 3. Estructurar el texto crudo a líneas limpias (máx. 6) con Gemini
     texto_crudo = _construir_texto_crudo(todas)
     proyectos_limpios = estructurar_proyectos(
-        texto_crudo, responsable=nombre_filtro or "", max_lineas=6,
+        texto_crudo, periodo_actual=periodo, max_lineas=6,
     )
     if not proyectos_limpios:
         logger.info("Extractor: estructurador vacío, usando fallback crudo→limpio")
-        proyectos_limpios = _fallback_crudo_a_limpio(todas, nombre_filtro or "")
+        proyectos_limpios = _fallback_crudo_a_limpio(todas)
 
     fin = datetime.utcnow()
     resultado = {
         "docente": docente,
-        "responsable": nombre_filtro,
+        "responsable": RESPONSABLE_GRUPAL,
         "periodo": periodo,
         "proyectos": proyectos_limpios,
         "_proyectos_crudos": todas,
