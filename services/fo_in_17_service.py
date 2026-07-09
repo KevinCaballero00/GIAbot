@@ -219,6 +219,20 @@ def generar_fo_in_17(
         resultado = extraer_proyectos(docente)
         resultado["semestre_destino"] = semestre
 
+        # Preservar lo recolectado por chat (secciones 2/3/4): el refresco automático
+        # solo actualiza las líneas de investigación extraídas, no borra esto.
+        if registro and registro.get("datos_json"):
+            try:
+                datos_previos = json.loads(registro["datos_json"])
+                for clave in (
+                    "trabajos_grado", "eventos", "fechas_otras_actividades",
+                    "recoleccion_completada", "fecha_recoleccion",
+                ):
+                    if clave in datos_previos:
+                        resultado[clave] = datos_previos[clave]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         datos_para_guardar = {k: v for k, v in resultado.items() if not k.startswith("_")}
         datos_json_str = json.dumps(datos_para_guardar, ensure_ascii=False)
         fuentes_str = json.dumps(resultado.get("fuentes_consultadas", []), ensure_ascii=False)
@@ -281,6 +295,61 @@ def generar_fo_in_17(
             error_log=str(exc),
         )
         raise
+
+
+def actualizar_datos_recolectados(
+    docente: dict,
+    semestre: str,
+    trabajos_grado: list[dict],
+    eventos: list[dict],
+    fechas_otras: dict,
+) -> dict:
+    """
+    Fusiona los datos recolectados por chat (secciones 2/3/4) en el registro
+    vigente del FO-IN-17 grupal, regenera el PDF y persiste.
+
+    Requiere que ya exista un registro para (RESPONSABLE_GRUPAL, semestre)
+    — lo crea `generar_fo_in_17` antes de iniciar la recolección.
+
+    Retorna el mismo contrato que `generar_fo_in_17`.
+    """
+    responsable_nombre = RESPONSABLE_GRUPAL
+    registro = obtener_registro_por_responsable(responsable_nombre, semestre)
+    if not registro:
+        raise ValueError(
+            f"No existe un registro FO-IN-17 para '{responsable_nombre}' en el semestre {semestre}"
+        )
+
+    datos = json.loads(registro["datos_json"]) if registro.get("datos_json") else {}
+    datos["trabajos_grado"] = trabajos_grado
+    datos["eventos"] = eventos
+    datos["fechas_otras_actividades"] = fechas_otras
+    datos["recoleccion_completada"] = True
+    datos["fecha_recoleccion"] = datetime.utcnow().isoformat()
+
+    pdf_path = generar_pdf_fo_in_17_plantilla(datos)
+    pdf_nombre = Path(pdf_path).name
+    pdf_web = f"/static/generados/{pdf_nombre}"
+
+    datos_json_str = json.dumps(datos, ensure_ascii=False)
+
+    _guardar_registro(
+        generado_por_docente_id=docente["id"],
+        responsable_nombre=responsable_nombre,
+        responsable_cvlac_url=registro.get("responsable_cvlac_url"),
+        semestre=semestre,
+        datos_json=datos_json_str,
+        pdf_path=pdf_web,
+        fuentes_usadas=registro.get("fuentes_usadas", "[]"),
+        estado="ok",
+    )
+
+    return {
+        "registro": obtener_registro_por_responsable(responsable_nombre, semestre),
+        "pdf_path": pdf_web,
+        "pdf_nombre": pdf_nombre,
+        "datos": datos,
+    }
 
 
 def refrescar_grupal(semestre: str | None = None) -> list[dict]:

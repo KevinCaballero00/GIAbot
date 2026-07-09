@@ -140,3 +140,113 @@ def estructurar_proyectos(
 
     logger.info("Estructurador: %d líneas estructuradas (grupal, periodo '%s')", len(proyectos), periodo_actual)
     return proyectos
+
+
+_PROMPT_TRABAJOS = """Eres un asistente que extrae información de TRABAJOS DE GRADO DIRIGIDOS
+(tesis, trabajos de pregrado/especialización/maestría/doctorado, tutorías) desde perfiles
+CvLAC de docentes del grupo de investigación GIA, para el formato oficial FO-IN-17,
+sección "2. Participación en Dirección de".
+
+Periodo académico actual: "{periodo_actual}"
+
+A continuación recibirás TEXTO CRUDO de las secciones "Trabajos dirigidos" / "Tutorías" /
+"Tesis" de varios docentes. Cada bloque puede venir precedido por una línea
+"Docente: <nombre>" que indica quién dirige ese trabajo.
+
+Devuelve EXCLUSIVAMENTE un arreglo JSON (sin texto adicional) con MÁXIMO {max_filas}
+objetos. Cada objeto debe tener exactamente estas claves:
+  - "titulo": título del trabajo de grado.
+  - "estudiante": nombre del estudiante dirigido.
+  - "director": nombre del docente director (el "Docente:" del bloque de origen).
+  - "programa": programa académico del estudiante, si aparece explícito.
+  - "institucion": institución del programa, si aparece explícita; usa "Universidad
+    Francisco de Paula Santander" si el contexto no indica otra institución.
+  - "nivel": uno de "Pregrado", "Especialización", "Maestría" o "Doctorado" según el
+    tipo de trabajo. Si no se puede determinar con certeza, usa cadena vacía "".
+
+Selección:
+  - Prioriza los trabajos más recientes: cuyo año coincida con "{periodo_actual}" o
+    esté abierto (sin fecha de fin).
+  - No incluyas más de {max_filas} trabajos.
+  - Ordena el resultado del más reciente al más antiguo.
+
+Reglas estrictas:
+  - NO inventes títulos, nombres de estudiantes ni directores; si un dato no aparece
+    explícitamente en el texto, déjalo como cadena vacía "".
+  - No dupliques el mismo trabajo.
+  - Si no hay trabajos identificables, devuelve un arreglo vacío [].
+
+TEXTO CRUDO:
+---
+{texto}
+---
+"""
+
+_NIVELES_TRABAJO_VALIDOS = {"Pregrado", "Especialización", "Maestría", "Doctorado"}
+
+
+def estructurar_trabajos_grado(
+    texto_crudo: str,
+    periodo_actual: str,
+    max_filas: int = 6,
+) -> list[dict]:
+    """
+    Estructura el texto crudo de "trabajos dirigidos" (CvLAC) en una lista de
+    sugerencias para la sección 2 del FO-IN-17.
+
+    Sin fallback crudo: si Gemini falla o no encuentra nada, retorna lista
+    vacía y el flujo conversacional del chat pregunta desde cero. Estas
+    sugerencias nunca se persisten directamente en el PDF sin que el docente
+    las confirme por chat.
+    """
+    texto = (texto_crudo or "").strip()
+    if not texto:
+        return []
+
+    texto = texto[:40000]
+
+    prompt = _PROMPT_TRABAJOS.format(
+        periodo_actual=periodo_actual or "",
+        max_filas=max_filas,
+        texto=texto,
+    )
+
+    try:
+        response = client.models.generate_content(
+            model=MODELO,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.2,
+            ),
+            contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+        )
+        data = json.loads(response.text)
+    except Exception as exc:
+        logger.warning("Estructurador: fallo al estructurar trabajos de grado – %s", exc)
+        return []
+
+    if not isinstance(data, list):
+        logger.warning("Estructurador: respuesta de trabajos no es lista (%s)", type(data).__name__)
+        return []
+
+    trabajos: list[dict] = []
+    for item in data[:max_filas]:
+        if not isinstance(item, dict):
+            continue
+        nivel = str(item.get("nivel") or "").strip()
+        if nivel not in _NIVELES_TRABAJO_VALIDOS:
+            nivel = ""
+        trabajos.append({
+            "titulo": str(item.get("titulo") or "").strip(),
+            "estudiante": str(item.get("estudiante") or "").strip(),
+            "director": str(item.get("director") or "").strip(),
+            "programa": str(item.get("programa") or "").strip(),
+            "institucion": str(item.get("institucion") or "").strip(),
+            "nivel": nivel,
+        })
+
+    logger.info(
+        "Estructurador: %d trabajos de grado sugeridos (periodo '%s')",
+        len(trabajos), periodo_actual,
+    )
+    return trabajos

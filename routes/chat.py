@@ -6,11 +6,14 @@ Maneja en orden de prioridad:
   2. Flujo de registro conversacional de proyectos en curso.
   3. Confirmación del FO-IN-17 fuente antes de generar el FO-IN-13.
   4. Flujo de % de cumplimiento del FO-IN-13 en curso.
-  5. Flujo de completado de PDF en curso.
-  6. Detección de solicitud de PDFs (FO-IN-13 / FO-IN-17).
-  7. Detección de intención de registrar proyecto.
-  8. Detección de intención de completar PDF.
-  9. Chat normal delegado al LLM.
+  5. Flujo de recolección conversacional de las secciones 2/3/4 del FO-IN-17 en curso.
+  6. Flujo de completado de PDF en curso.
+  7. Detección de "actualizar plan de acción" (ANTES de detectar_pdf_solicitado:
+     "plan de acción" ya es alias del 17 y entregaría el cacheado sin re-preguntar).
+  8. Detección de solicitud de PDFs (FO-IN-13 / FO-IN-17).
+  9. Detección de intención de registrar proyecto.
+  10. Detección de intención de completar PDF.
+  11. Chat normal delegado al LLM.
 
 Todas las interacciones quedan registradas en conversation_logs.
 """
@@ -33,7 +36,7 @@ from services.auth_service import verificar_credenciales
 from services.complete_pdf import pdf_completer
 from services.extractor_proyectos import RESPONSABLE_GRUPAL, calcular_periodo
 from services.fo_in_13_service import generar_fo_in_13, obtener_fuente_fo_in_13
-from services.fo_in_17_service import generar_fo_in_17
+from services.fo_in_17_service import actualizar_datos_recolectados, generar_fo_in_17
 from services.pdf_fo_in_13 import proyectos_validos
 
 
@@ -62,6 +65,15 @@ ALIASES_17 = [
     "fo-in-17", "fo in 17", "foin17", "informe 17", "número 17",
     "numero 17", "plan de accion", "plan de acción", "plan accion",
     "plan acción",
+]
+
+# ── Alias para forzar la re-recolección de las secciones 2/3/4 del FO-IN-17 ──
+ALIASES_ACTUALIZAR_17 = [
+    "actualizar plan de accion", "actualizar plan de acción",
+    "actualizar el plan de accion", "actualizar el plan de acción",
+    "actualizar fo-in-17", "actualizar fo in 17", "actualizar el fo-in-17",
+    "modificar plan de accion", "modificar plan de acción",
+    "editar plan de accion", "editar plan de acción",
 ]
 
 # ── Alias para completar PDF ──────────────────────────────────────────────────
@@ -115,6 +127,76 @@ _CAMPOS_PROYECTO = [
         "obligatorio": False,
         "default": None,  # se resuelve en tiempo de ejecución
     },
+]
+
+# ── Campos de la recolección conversacional del FO-IN-17 (secciones 2/3/4) ───
+_CAMPOS_TRABAJO = [
+    {"clave": "titulo", "pregunta": "¿Cuál es el **título** del trabajo de grado?", "default": None},
+    {"clave": "estudiante", "pregunta": "¿Cuál es el **nombre del estudiante**?", "default": None},
+    {
+        "clave": "director",
+        "pregunta": "¿Quién es el **director**?\n_(deja vacío o escribe **yo** para usar tu nombre)_",
+        "default": "__DOCENTE__",
+    },
+    {"clave": "programa", "pregunta": "¿Cuál es el **programa académico**?", "default": None},
+    {
+        "clave": "institucion",
+        "pregunta": "¿Cuál es la **institución**?\n_(deja vacío para usar UFPS)_",
+        "default": "Universidad Francisco de Paula Santander",
+    },
+    {
+        "clave": "nivel",
+        "pregunta": "¿Cuál es el **nivel**? (Pregrado / Especialización / Maestría / Doctorado)",
+        "default": None,
+        "validador": "nivel",
+    },
+]
+
+_CAMPOS_EVENTO = [
+    {"clave": "nombre", "pregunta": "¿Cuál es el **nombre del evento**?", "default": None},
+    {
+        "clave": "fecha",
+        "pregunta": "¿Cuál es la **fecha de realización**?\n_(ej: 15/10/2026)_",
+        "default": None,
+        "validador": "fecha",
+    },
+    {
+        "clave": "responsable",
+        "pregunta": "¿Quién es el **responsable**?\n_(deja vacío para usar \"Miembros GIA\")_",
+        "default": "Miembros GIA",
+    },
+    {
+        "clave": "institucion_promotora",
+        "pregunta": "¿Cuál es la **institución promotora**?\n_(deja vacío para usar UFPS)_",
+        "default": "Universidad Francisco de Paula Santander",
+    },
+    {
+        "clave": "entidades_participantes",
+        "pregunta": "¿Qué **entidades participantes** hay?\n_(deja vacío si no aplica)_",
+        "default": "",
+    },
+]
+
+_FECHAS_OTRAS = [
+    {"clave": "coordinacion_semillero", "pregunta": "¿Cuál es la **fecha** de la Coordinación del Semillero SIA?"},
+    {"clave": "eventos_academicos", "pregunta": "¿Cuál es la **fecha** de Participación en Eventos Académicos?"},
+    {"clave": "actualizaciones", "pregunta": "¿Cuál es la **fecha** de Actualizaciones (talleres/cursos/webinars)?"},
+    {
+        "clave": "reunion_mensual",
+        "pregunta": (
+            "¿Cuál es la **fecha** de la Reunión mensual de avances GIA?\n"
+            "_(puedes escribir texto libre, ej: \"Último viernes de cada mes\")_"
+        ),
+    },
+]
+
+_PALABRAS_TERMINAR = [
+    "ninguno", "ninguna", "no tengo", "listo", "omitir", "nada",
+    "terminar", "terminé", "termine", "ya no",
+]
+_PALABRAS_OMITIR_TODO = [
+    "omitir todo", "genera ya", "generar ya", "genéralo ya", "generalo ya",
+    "termina todo", "así está bien", "asi esta bien",
 ]
 
 VERBOS_SOLICITUD = [
@@ -182,6 +264,77 @@ def _parse_porcentaje(mensaje: str) -> str | None:
     return f"{valor}%"
 
 
+def _quitar_tildes(s: str) -> str:
+    import unicodedata
+    nfkd = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _es_terminar(msg_lower: str) -> bool:
+    return any(p in msg_lower for p in _PALABRAS_TERMINAR)
+
+
+def _parse_nivel(texto: str) -> str | None:
+    """Normaliza el nivel de un trabajo de grado a uno de los 4 valores oficiales."""
+    t = _quitar_tildes((texto or "").strip().lower())
+    mapa = {
+        "pregrado": "Pregrado",
+        "especializacion": "Especialización",
+        "especializaciones": "Especialización",
+        "maestria": "Maestría",
+        "doctorado": "Doctorado",
+    }
+    for k, v in mapa.items():
+        if k in t:
+            return v
+    return None
+
+
+_MESES_ES = {
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+    "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+}
+
+
+def _parse_fecha(texto: str) -> str | None:
+    """
+    Normaliza una fecha a DD/MM/AAAA. Acepta DD/MM/AAAA, DD-MM-AAAA, AAAA-MM-DD
+    y "DD de <mes> de AAAA". Retorna None si no reconoce ningún formato de fecha
+    (el llamador decide si reintentar o aceptar el texto literal).
+    """
+    t = (texto or "").strip()
+
+    m = re.match(r"^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$", t)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return datetime(y, mo, d).strftime("%d/%m/%Y")
+        except ValueError:
+            return None
+
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", t)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return datetime(y, mo, d).strftime("%d/%m/%Y")
+        except ValueError:
+            return None
+
+    m = re.match(r"^(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})$", _quitar_tildes(t.lower()))
+    if m:
+        d = int(m.group(1))
+        mo = _MESES_ES.get(m.group(2))
+        y = int(m.group(3))
+        if mo:
+            try:
+                return datetime(y, mo, d).strftime("%d/%m/%Y")
+            except ValueError:
+                return None
+
+    return None
+
+
 def detectar_intencion_completar(mensaje: str) -> int | None:
     """Retorna 13, 17 o None."""
     msg = mensaje.lower()
@@ -247,32 +400,86 @@ def detectar_pdf_solicitado(mensaje: str, historial: list) -> list[int]:
 async def _bloque_fo_in_17(
     docente: dict | None,
     semestre_actual: str,
-) -> tuple[str, list[str]]:
-    """Genera el FO-IN-17 y devuelve (bloque_markdown, fuentes)."""
+    session_id: str,
+    forzar_recoleccion: bool = False,
+) -> tuple[str, list[str], bool]:
+    """
+    Genera el FO-IN-17 y devuelve (bloque_markdown, fuentes, recoleccion_iniciada).
+
+    Si los datos de las secciones 2/3/4 ya fueron recolectados (y no se pide
+    `forzar_recoleccion`), entrega el link directo. En caso contrario configura
+    la sesión para iniciar la recolección conversacional y retorna el mensaje
+    de arranque en vez del link.
+    """
     fuentes: list[str] = []
     try:
         resultado_17 = await asyncio.to_thread(
             generar_fo_in_17, docente, semestre_actual
         )
-        nombre_17 = resultado_17["pdf_nombre"]
-        advertencia = resultado_17.get("advertencia", "")
-        fuentes.extend(resultado_17.get("datos", {}).get("fuentes_consultadas", []))
-        bloque = (
-            "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
-            f"Semestre: {semestre_actual}\n"
-            f"👉 [Descargar informe (PDF)](/descargar/17/{nombre_17})"
-        )
-        if advertencia:
-            bloque += f"\n⚠️ {advertencia}"
-        _guardar_reporte_asinc(docente, "17", semestre_actual, nombre_17, fuentes, RESPONSABLE_GRUPAL)
-        return bloque, fuentes
     except Exception as exc:
         return (
             "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
             f"⚠️ No se pudo generar el PDF: {exc}\n"
             "👉 [Descargar plantilla base](/static/docs/FO-IN-17%20PLAN%20DE%20ACCION%20GRUPOS%20INV%20V1.pdf)",
             fuentes,
+            False,
         )
+
+    nombre_17 = resultado_17["pdf_nombre"]
+    advertencia = resultado_17.get("advertencia", "")
+    datos = resultado_17.get("datos", {})
+    fuentes.extend(datos.get("fuentes_consultadas", []))
+
+    if datos.get("recoleccion_completada") and not forzar_recoleccion:
+        bloque = (
+            "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
+            f"Semestre: {semestre_actual}\n"
+            f"👉 [Descargar informe (PDF)](/descargar/17/{nombre_17})\n"
+            "_Escribe **actualizar plan de acción** si deseas modificar los datos recolectados._"
+        )
+        if advertencia:
+            bloque += f"\n⚠️ {advertencia}"
+        _guardar_reporte_asinc(docente, "17", semestre_actual, nombre_17, fuentes, RESPONSABLE_GRUPAL)
+        return bloque, fuentes, False
+
+    sugerencias = datos.get("trabajos_grado_sugeridos") or []
+    estado = sesiones_activas.setdefault(session_id, {})
+    estado.update({
+        "paso": "recolectando_fo_in_17",
+        "autenticado": True,
+        "docente": docente,
+        "fo17_semestre": semestre_actual,
+        "fo17_fase": "trabajos",
+        "fo17_subfase": "inicio",
+        "fo17_trabajos": [],
+        "fo17_eventos": [],
+        "fo17_fechas_otras": {},
+        "fo17_item_actual": {},
+        "fo17_campo_idx": 0,
+        "fo17_sugerencias": sugerencias,
+        "fo17_fecha_idx": 0,
+        "fo17_intentos": 0,
+    })
+
+    bloque = (
+        "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
+        "Antes de entregarte el PDF necesito completar la sección "
+        "**2. Participación en Dirección de** (trabajos de grado dirigidos).\n\n"
+    )
+    if sugerencias:
+        lineas_sug = "\n".join(
+            f"{i}. {s.get('titulo') or '(sin título)'} — {s.get('estudiante') or '(sin estudiante)'}"
+            for i, s in enumerate(sugerencias, 1)
+        )
+        bloque += (
+            "Encontré estas sugerencias en el CvLAC (confírmalas escribiendo su número, "
+            "o dime el título de un trabajo distinto):\n\n" + lineas_sug + "\n\n"
+        )
+    bloque += (
+        "¿Cuál es el **título** del primer trabajo de grado dirigido? "
+        "_(escribe **ninguno** o **listo** si no hay ninguno)_"
+    )
+    return bloque, fuentes, True
 
 
 async def _bloque_fo_in_13(
@@ -323,15 +530,21 @@ async def iniciar_entrega_pdfs(
     session_id: str,
     pdfs: list,
     docente: dict | None,
+    forzar_recoleccion_17: bool = False,
 ) -> tuple[str, list[str]]:
     """
     Orquesta la entrega de los PDFs solicitados.
 
-    - FO-IN-17 se genera y entrega de inmediato.
+    - FO-IN-17 se genera y entrega de inmediato, salvo que falten datos de las
+      secciones 2/3/4 por recolectar (o se pida `forzar_recoleccion_17`), en
+      cuyo caso se arranca el flujo conversacional (`recolectando_fo_in_17`).
     - FO-IN-13: primero muestra los metadatos del FO-IN-17 que se usará como
       fuente y pide confirmación (estado `confirmando_fo_in_13`). Cuando el
       docente confirma, `_procesar_confirmacion_fo_in_13` inicia el flujo de
       % de cumplimiento o genera directo si no hay proyectos.
+    - Si el FO-IN-17 inició su propia recolección y también se pidió el 13,
+      el 13 se encola (`fo17_pdfs_restantes`) para no correr dos máquinas de
+      estado conversacionales a la vez; se retoma al terminar la del 17.
 
     Retorna (texto_respuesta, fuentes).
     """
@@ -339,13 +552,19 @@ async def iniciar_entrega_pdfs(
     partes: list[str] = []
     fuentes: list[str] = []
     inicio_preguntas = False
+    recoleccion_17_iniciada = False
 
     if 17 in pdfs:
-        bloque_17, fuentes_17 = await _bloque_fo_in_17(docente, semestre_actual)
+        bloque_17, fuentes_17, recoleccion_17_iniciada = await _bloque_fo_in_17(
+            docente, semestre_actual, session_id, forzar_recoleccion=forzar_recoleccion_17,
+        )
         partes.append(bloque_17)
         fuentes.extend(fuentes_17)
 
-    if 13 in pdfs:
+    if 13 in pdfs and recoleccion_17_iniciada:
+        estado_ses = sesiones_activas.setdefault(session_id, {})
+        estado_ses["fo17_pdfs_restantes"] = [13]
+    elif 13 in pdfs:
         try:
             fuente = await asyncio.to_thread(
                 obtener_fuente_fo_in_13, docente, semestre_actual
@@ -394,7 +613,10 @@ async def iniciar_entrega_pdfs(
             partes.append(msg_confirmacion)
             inicio_preguntas = True
 
-    if inicio_preguntas:
+    if recoleccion_17_iniciada:
+        # El FO-IN-17 aún no se entrega: se inició su propia recolección conversacional.
+        intro = ""
+    elif inicio_preguntas:
         # Aún no se entrega el FO-IN-13; se inician las preguntas de %.
         intro = "Aquí tienes el FO-IN-17 solicitado:" if 17 in pdfs else ""
     else:
@@ -530,6 +752,299 @@ async def _procesar_cumplimiento(session_id: str, mensaje: str) -> str:
         estado.pop(clave, None)
 
     return "✅ ¡Listo! Generé tu informe con los porcentajes indicados.\n\n" + bloque
+
+
+# ── Flujo de recolección conversacional del FO-IN-17 (secciones 2/3/4) ──────
+
+def _resolver_valor_campo(
+    campo: dict, msg: str, docente: dict | None, estado: dict,
+) -> tuple[str, str | None]:
+    """
+    Resuelve el valor final de un campo (_CAMPOS_TRABAJO / _CAMPOS_EVENTO)
+    aplicando default y validador. Retorna (valor, mensaje_error); si
+    mensaje_error no es None, no se debe avanzar de campo.
+    """
+    valor = msg.strip()
+    default = campo.get("default")
+
+    if not valor:
+        if default == "__DOCENTE__":
+            return (docente.get("nombre") if docente else ""), None
+        return (default or ""), None
+
+    if default == "__DOCENTE__" and valor.lower() in ("yo", "yo mismo"):
+        return (docente.get("nombre") if docente else ""), None
+
+    validador = campo.get("validador")
+    if validador == "nivel":
+        nivel = _parse_nivel(valor)
+        if nivel is None:
+            return "", (
+                "No reconocí ese nivel. Responde con una de estas opciones: "
+                "**Pregrado**, **Especialización**, **Maestría** o **Doctorado**."
+            )
+        return nivel, None
+
+    if validador == "fecha":
+        intentos = estado.get("fo17_intentos", 0)
+        fecha = _parse_fecha(valor)
+        if fecha is None:
+            if intentos >= 1:
+                estado["fo17_intentos"] = 0
+                return valor, None
+            estado["fo17_intentos"] = intentos + 1
+            return "", (
+                "No reconocí esa fecha. Usa el formato **DD/MM/AAAA** (ej: 15/10/2026), "
+                "o vuelve a escribirla y la aceptaré tal cual la escribas."
+            )
+        estado["fo17_intentos"] = 0
+        return fecha, None
+
+    return valor, None
+
+
+def _pasar_a_fase_eventos(estado: dict) -> str:
+    estado["fo17_fase"] = "eventos"
+    estado["fo17_subfase"] = "inicio"
+    estado["fo17_intentos"] = 0
+    return (
+        "Ahora la sección **3. Organización de Eventos de Investigación/Científicos**.\n\n"
+        "¿Cuál es el **nombre** del primer evento? "
+        "_(escribe **ninguno** o **listo** si no hay ninguno)_"
+    )
+
+
+def _pasar_a_fase_fechas_otras(estado: dict) -> str:
+    estado["fo17_fase"] = "fechas_otras"
+    estado["fo17_fecha_idx"] = 0
+    estado["fo17_intentos"] = 0
+    primera = _FECHAS_OTRAS[0]
+    return (
+        "Por último, la sección **4. Otras Actividades de Investigación**.\n\n"
+        + primera["pregunta"] + "\n_(escribe **omitir** para dejarla vacía)_"
+    )
+
+
+async def _procesar_fase_trabajos(session_id: str, mensaje: str) -> str:
+    estado = sesiones_activas[session_id]
+    msg = mensaje.strip()
+    msg_lower = msg.lower()
+    docente = estado.get("docente")
+
+    if estado["fo17_subfase"] == "inicio":
+        if _es_terminar(msg_lower):
+            return _pasar_a_fase_eventos(estado)
+
+        sugerencias = estado.get("fo17_sugerencias") or []
+        if msg.isdigit() and sugerencias:
+            n = int(msg)
+            if 1 <= n <= len(sugerencias):
+                sug = sugerencias[n - 1]
+                trabajo = {
+                    "titulo": sug.get("titulo", ""),
+                    "estudiante": sug.get("estudiante", ""),
+                    "director": sug.get("director") or (docente.get("nombre") if docente else ""),
+                    "programa": sug.get("programa", ""),
+                    "institucion": sug.get("institucion") or "Universidad Francisco de Paula Santander",
+                    "nivel": _parse_nivel(sug.get("nivel", "")) or "Pregrado",
+                }
+                estado["fo17_trabajos"].append(trabajo)
+                if len(estado["fo17_trabajos"]) >= 6:
+                    return (
+                        f"✅ Trabajo agregado: **{trabajo['titulo']}**.\n"
+                        "Se alcanzó el máximo de 6 trabajos de grado.\n\n"
+                        + _pasar_a_fase_eventos(estado)
+                    )
+                return (
+                    f"✅ Trabajo agregado: **{trabajo['titulo']}**.\n\n"
+                    "¿Cuál es el título del siguiente trabajo? "
+                    "_(escribe **ninguno** o **listo** para continuar)_"
+                )
+            return (
+                "Ese número no corresponde a ninguna sugerencia. Escribe el título del "
+                "trabajo o **ninguno**/**listo** para continuar."
+            )
+
+        estado["fo17_item_actual"] = {"titulo": msg}
+        estado["fo17_campo_idx"] = 1
+        estado["fo17_subfase"] = "campos"
+        estado["fo17_intentos"] = 0
+        return _CAMPOS_TRABAJO[1]["pregunta"]
+
+    idx = estado["fo17_campo_idx"]
+    campo = _CAMPOS_TRABAJO[idx]
+    valor_final, error = _resolver_valor_campo(campo, msg, docente, estado)
+    if error:
+        return error
+
+    estado["fo17_item_actual"][campo["clave"]] = valor_final
+    siguiente_idx = idx + 1
+    if siguiente_idx < len(_CAMPOS_TRABAJO):
+        estado["fo17_campo_idx"] = siguiente_idx
+        estado["fo17_intentos"] = 0
+        return _CAMPOS_TRABAJO[siguiente_idx]["pregunta"]
+
+    trabajo = estado["fo17_item_actual"]
+    estado["fo17_trabajos"].append(trabajo)
+    estado["fo17_item_actual"] = {}
+    estado["fo17_subfase"] = "inicio"
+
+    if len(estado["fo17_trabajos"]) >= 6:
+        return (
+            f"✅ Trabajo agregado: **{trabajo['titulo']}**.\n"
+            "Se alcanzó el máximo de 6 trabajos de grado.\n\n"
+            + _pasar_a_fase_eventos(estado)
+        )
+
+    return (
+        f"✅ Trabajo agregado: **{trabajo['titulo']}**.\n\n"
+        "¿Cuál es el título del siguiente trabajo? "
+        "_(escribe **ninguno** o **listo** para continuar)_"
+    )
+
+
+async def _procesar_fase_eventos(session_id: str, mensaje: str) -> str:
+    estado = sesiones_activas[session_id]
+    msg = mensaje.strip()
+    msg_lower = msg.lower()
+    docente = estado.get("docente")
+
+    if estado["fo17_subfase"] == "inicio":
+        if _es_terminar(msg_lower):
+            return _pasar_a_fase_fechas_otras(estado)
+
+        estado["fo17_item_actual"] = {"nombre": msg}
+        estado["fo17_campo_idx"] = 1
+        estado["fo17_subfase"] = "campos"
+        estado["fo17_intentos"] = 0
+        return _CAMPOS_EVENTO[1]["pregunta"]
+
+    idx = estado["fo17_campo_idx"]
+    campo = _CAMPOS_EVENTO[idx]
+    valor_final, error = _resolver_valor_campo(campo, msg, docente, estado)
+    if error:
+        return error
+
+    estado["fo17_item_actual"][campo["clave"]] = valor_final
+    siguiente_idx = idx + 1
+    if siguiente_idx < len(_CAMPOS_EVENTO):
+        estado["fo17_campo_idx"] = siguiente_idx
+        estado["fo17_intentos"] = 0
+        return _CAMPOS_EVENTO[siguiente_idx]["pregunta"]
+
+    evento = estado["fo17_item_actual"]
+    estado["fo17_eventos"].append(evento)
+    estado["fo17_item_actual"] = {}
+    estado["fo17_subfase"] = "inicio"
+
+    if len(estado["fo17_eventos"]) >= 4:
+        return (
+            f"✅ Evento agregado: **{evento['nombre']}**.\n"
+            "Se alcanzó el máximo de 4 eventos.\n\n"
+            + _pasar_a_fase_fechas_otras(estado)
+        )
+
+    return (
+        f"✅ Evento agregado: **{evento['nombre']}**.\n\n"
+        "¿Cuál es el nombre del siguiente evento? "
+        "_(escribe **ninguno** o **listo** para continuar)_"
+    )
+
+
+async def _procesar_fase_fechas_otras(session_id: str, mensaje: str) -> str:
+    estado = sesiones_activas[session_id]
+    idx = estado["fo17_fecha_idx"]
+    actividad = _FECHAS_OTRAS[idx]
+    msg = mensaje.strip()
+    msg_lower = msg.lower()
+
+    if msg_lower in ("omitir", "ninguno", "ninguna", "no"):
+        valor = ""
+    else:
+        intentos = estado.get("fo17_intentos", 0)
+        fecha = _parse_fecha(msg)
+        if fecha is None:
+            if intentos >= 1:
+                valor = msg
+                estado["fo17_intentos"] = 0
+            else:
+                estado["fo17_intentos"] = intentos + 1
+                return (
+                    "No reconocí esa fecha. Usa el formato **DD/MM/AAAA**, escribe **omitir** "
+                    "para dejarla vacía, o vuelve a escribirla tal cual y la aceptaré como texto."
+                )
+        else:
+            valor = fecha
+            estado["fo17_intentos"] = 0
+
+    estado["fo17_fechas_otras"][actividad["clave"]] = valor
+    siguiente_idx = idx + 1
+    if siguiente_idx < len(_FECHAS_OTRAS):
+        estado["fo17_fecha_idx"] = siguiente_idx
+        siguiente = _FECHAS_OTRAS[siguiente_idx]
+        return f"✅ Registrado.\n\n{siguiente['pregunta']}\n_(escribe **omitir** para dejarla vacía)_"
+
+    return await _finalizar_recoleccion_fo_in_17(session_id)
+
+
+async def _finalizar_recoleccion_fo_in_17(session_id: str) -> str:
+    """Persiste lo recolectado, regenera el PDF y retoma el FO-IN-13 si estaba encolado."""
+    estado = sesiones_activas[session_id]
+    docente = estado.get("docente")
+    semestre = estado.get("fo17_semestre") or calcular_periodo()[0]
+    trabajos = estado.get("fo17_trabajos", [])
+    eventos = estado.get("fo17_eventos", [])
+    fechas_otras = estado.get("fo17_fechas_otras", {})
+    pdfs_restantes = estado.get("fo17_pdfs_restantes", [])
+
+    try:
+        resultado = await asyncio.to_thread(
+            actualizar_datos_recolectados, docente, semestre, trabajos, eventos, fechas_otras,
+        )
+        nombre_17 = resultado["pdf_nombre"]
+        fuentes = resultado.get("datos", {}).get("fuentes_consultadas", [])
+        _guardar_reporte_asinc(docente, "17", semestre, nombre_17, fuentes, RESPONSABLE_GRUPAL)
+        bloque = (
+            "✅ ¡Listo! Registré la información y regeneré el Plan de Acción.\n\n"
+            f"👉 [Descargar informe (PDF)](/descargar/17/{nombre_17})"
+        )
+    except Exception as exc:
+        bloque = f"❌ No se pudo regenerar el FO-IN-17 con los datos recolectados: {exc}"
+
+    for clave in (
+        "fo17_fase", "fo17_subfase", "fo17_trabajos", "fo17_eventos",
+        "fo17_fechas_otras", "fo17_item_actual", "fo17_campo_idx",
+        "fo17_sugerencias", "fo17_fecha_idx", "fo17_intentos",
+        "fo17_semestre", "fo17_pdfs_restantes",
+    ):
+        estado.pop(clave, None)
+    estado["paso"] = "autenticado"
+
+    if 13 in pdfs_restantes:
+        bloque_13, _ = await iniciar_entrega_pdfs(session_id, [13], docente)
+        bloque += "\n\n" + bloque_13
+
+    return bloque
+
+
+async def _procesar_recoleccion_fo_in_17(session_id: str, mensaje: str) -> str:
+    """Despacha el mensaje a la fase activa de la recolección (trabajos/eventos/fechas)."""
+    estado = sesiones_activas[session_id]
+    msg_lower = mensaje.strip().lower()
+
+    if any(p in msg_lower for p in _PALABRAS_OMITIR_TODO):
+        return await _finalizar_recoleccion_fo_in_17(session_id)
+
+    fase = estado.get("fo17_fase")
+    if fase == "trabajos":
+        return await _procesar_fase_trabajos(session_id, mensaje)
+    if fase == "eventos":
+        return await _procesar_fase_eventos(session_id, mensaje)
+    if fase == "fechas_otras":
+        return await _procesar_fase_fechas_otras(session_id, mensaje)
+
+    estado["paso"] = "autenticado"
+    return "❌ Ocurrió un error en la recolección. Por favor vuelve a solicitar el plan de acción."
 
 
 def _guardar_reporte_asinc(docente, tipo, semestre, pdf_nombre, fuentes, responsable_nombre=None):
@@ -701,8 +1216,9 @@ async def chat(data: Message):
                     return {"reply": respuesta}
 
                 pdfs = estado.get("pdfs_solicitados", [])
+                forzar_17 = estado.get("forzar_recoleccion_17", False)
                 respuesta_docs, fuentes_log = await iniciar_entrega_pdfs(
-                    session_id, pdfs, docente
+                    session_id, pdfs, docente, forzar_recoleccion_17=forzar_17,
                 )
                 intencion = f"solicitud_pdf_{pdfs}"
                 respuesta = f"✅ Bienvenido/a, **{docente['nombre']}**. Acceso verificado.\n\n" + respuesta_docs
@@ -734,6 +1250,12 @@ async def chat(data: Message):
             respuesta = await _procesar_cumplimiento(session_id, mensaje)
             return {"reply": respuesta}
 
+        # ── 2d. Flujo de recolección conversacional del FO-IN-17 en curso ───
+        if estado and estado.get("paso") == "recolectando_fo_in_17":
+            intencion = "solicitud_pdf_[17]"
+            respuesta = await _procesar_recoleccion_fo_in_17(session_id, mensaje)
+            return {"reply": respuesta}
+
         # ── 3. Flujo de completado de PDF en curso ──────────────────────────
         if estado and estado.get("paso") == "completando_pdf":
             intencion = "completar_pdf"
@@ -761,6 +1283,31 @@ async def chat(data: Message):
                 except Exception as e:
                     respuesta = f"❌ Ocurrió un error al generar el PDF: {str(e)}"
                     exito = False
+            return {"reply": respuesta}
+
+        # ── 3b. Detección de "actualizar plan de acción" ─────────────────────
+        # Debe ir ANTES de detectar_pdf_solicitado: "plan de acción" ya es
+        # alias del FO-IN-17 y entregaría el cacheado sin re-preguntar.
+        if any(alias in mensaje.lower() for alias in ALIASES_ACTUALIZAR_17):
+            intencion = "actualizar_fo_in_17"
+            if autenticado:
+                respuesta, fuentes_log = await iniciar_entrega_pdfs(
+                    session_id, [17], estado["docente"], forzar_recoleccion_17=True,
+                )
+            else:
+                sesiones_activas[session_id] = {
+                    "paso": "esperando_usuario",
+                    "pdfs_solicitados": [17],
+                    "flujo_post_auth": None,
+                    "forzar_recoleccion_17": True,
+                    "usuario_ingresado": None,
+                    "autenticado": False,
+                    "docente": None,
+                }
+                respuesta = (
+                    "🔒 Para actualizar el plan de acción necesito verificar tu identidad.\n\n"
+                    "👤 Por favor ingresa tu **usuario**:"
+                )
             return {"reply": respuesta}
 
         # ── 4. Detección de solicitud de PDFs ──────────────────────────────

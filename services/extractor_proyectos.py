@@ -30,7 +30,7 @@ from services.scraper import (
     _limpiar_dom,
     _extraer_docentes_bruto,
 )
-from services.estructurador import estructurar_proyectos
+from services.estructurador import estructurar_proyectos, estructurar_trabajos_grado
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +55,73 @@ KW_PROYECTOS = {
 PERIODO_RE = re.compile(r"\b(20\d{2}[-–/]\d{1,2}|20\d{2})\b")
 MAX_LINEAS_SECCION = 100
 
+KW_TRABAJOS = {
+    "trabajos dirigidos",
+    "trabajos de grado de pregrado",
+    "trabajos de grado de especialización",
+    "trabajos de grado de especializacion",
+    "trabajos de grado de maestría",
+    "trabajos de grado de maestria",
+    "trabajos de grado dirigidos",
+    "tesis de doctorado",
+    "tesis de maestría",
+    "tesis de maestria",
+    "tutorías",
+    "tutorias",
+    "dirección de trabajos de grado",
+    "direccion de trabajos de grado",
+}
+
+
+def _capturar_secciones(lineas: list[str], keywords: set[str]) -> list[list[str]]:
+    """Agrupa líneas consecutivas en secciones que comienzan con alguna de las
+    `keywords` dadas. Corta una sección tras 3 líneas vacías seguidas (una sola
+    línea vacía puede separar campos dentro de la misma entrada en CvLAC)."""
+    secciones: list[list[str]] = []
+    buf: list[str] = []
+    capturando = False
+    consecutivos_vacios = 0
+
+    for linea in lineas:
+        ll = linea.lower().strip()
+        es_inicio = any(kw in ll for kw in keywords)
+
+        if es_inicio:
+            if buf:
+                secciones.append(buf)
+            buf = [linea]
+            capturando = True
+            consecutivos_vacios = 0
+        elif capturando:
+            if not ll:
+                consecutivos_vacios += 1
+                if consecutivos_vacios >= 3 and len(buf) > 2:
+                    secciones.append(buf)
+                    buf = []
+                    capturando = False
+                    consecutivos_vacios = 0
+                else:
+                    buf.append(linea)
+            else:
+                consecutivos_vacios = 0
+                buf.append(linea)
+                if len(buf) >= MAX_LINEAS_SECCION:
+                    secciones.append(buf)
+                    buf = []
+                    capturando = False
+
+    if buf:
+        secciones.append(buf)
+
+    return secciones
+
 
 # ─────────────────────────── extractor CvLAC ─────────────────────────────────
 
 def _extraer_proyectos_cvlac(nombre_docente: str, cvlac_url: str) -> list[dict]:
-    """Extrae secciones de proyectos del perfil CvLAC de un docente."""
+    """Extrae secciones de proyectos (y trabajos de grado dirigidos) del perfil
+    CvLAC de un docente. Ambas secciones se capturan sobre el mismo HTML ya
+    descargado, sin una segunda petición."""
     fecha = datetime.utcnow().isoformat()
     html = _fetch(cvlac_url, timeout=20)
 
@@ -81,46 +143,11 @@ def _extraer_proyectos_cvlac(nombre_docente: str, cvlac_url: str) -> list[dict]:
     texto = re.sub(r"\n{3,}", "\n\n", texto)
     lineas = texto.split("\n")
 
-    secciones: list[list[str]] = []
-    buf: list[str] = []
-    capturando = False
-    consecutivos_vacios = 0
+    secciones = _capturar_secciones(lineas, KW_PROYECTOS)
 
-    for linea in lineas:
-        ll = linea.lower().strip()
-        es_inicio = any(kw in ll for kw in KW_PROYECTOS)
-
-        if es_inicio:
-            if buf:
-                secciones.append(buf)
-            buf = [linea]
-            capturando = True
-            consecutivos_vacios = 0
-        elif capturando:
-            if not ll:
-                consecutivos_vacios += 1
-                # Cortar solo tras 3 líneas vacías seguidas (una sola línea vacía
-                # puede separar campos dentro del mismo proyecto en CvLAC)
-                if consecutivos_vacios >= 3 and len(buf) > 2:
-                    secciones.append(buf)
-                    buf = []
-                    capturando = False
-                    consecutivos_vacios = 0
-                else:
-                    buf.append(linea)
-            else:
-                consecutivos_vacios = 0
-                buf.append(linea)
-                if len(buf) >= MAX_LINEAS_SECCION:
-                    secciones.append(buf)
-                    buf = []
-                    capturando = False
-
-    if buf:
-        secciones.append(buf)
-
+    resultado: list[dict] = []
     if not secciones:
-        return [{
+        resultado.append({
             "fuente": "CvLAC (Minciencias)",
             "docente": nombre_docente,
             "proyecto": None,
@@ -128,10 +155,35 @@ def _extraer_proyectos_cvlac(nombre_docente: str, cvlac_url: str) -> list[dict]:
             "descripcion": "No se encontraron secciones de proyectos en el perfil",
             "enlace_origen": cvlac_url,
             "fecha_extraccion": fecha,
-        }]
+        })
+    else:
+        for sec in secciones:
+            texto_sec = "\n".join(sec).strip()
+            titulo = sec[0].strip()
 
-    resultado: list[dict] = []
-    for sec in secciones:
+            periodo = None
+            for linea in sec:
+                m = PERIODO_RE.search(linea)
+                if m:
+                    periodo = m.group(0)
+                    break
+
+            resultado.append({
+                "fuente": "CvLAC (Minciencias)",
+                "docente": nombre_docente,
+                "proyecto": titulo,
+                "periodo": periodo,
+                "descripcion": texto_sec[:2500],
+                "enlace_origen": cvlac_url,
+                "fecha_extraccion": fecha,
+            })
+
+    # Trabajos de grado dirigidos: mismo HTML, distintas palabras clave. Se
+    # marcan con "seccion" para excluirlas de _construir_texto_crudo (no deben
+    # contaminar la estructuración de proyectos) y alimentar por separado a
+    # estructurar_trabajos_grado().
+    secciones_trabajos = _capturar_secciones(lineas, KW_TRABAJOS)
+    for sec in secciones_trabajos:
         texto_sec = "\n".join(sec).strip()
         titulo = sec[0].strip()
 
@@ -150,6 +202,7 @@ def _extraer_proyectos_cvlac(nombre_docente: str, cvlac_url: str) -> list[dict]:
             "descripcion": texto_sec[:2500],
             "enlace_origen": cvlac_url,
             "fecha_extraccion": fecha,
+            "seccion": "trabajos_dirigidos",
         })
 
     return resultado
@@ -284,7 +337,7 @@ def _construir_texto_crudo(entradas: list[dict]) -> str:
     presupuesto_por_docente = 3500
     partes: list[str] = []
     for e in entradas:
-        if e.get("error"):
+        if e.get("error") or e.get("seccion") == "trabajos_dirigidos":
             continue
         titulo = (e.get("proyecto") or "").strip()
         desc = (e.get("descripcion") or "").strip()[:presupuesto_por_docente]
@@ -293,6 +346,27 @@ def _construir_texto_crudo(entradas: list[dict]) -> str:
         bloque = "\n".join(p for p in [
             f"Docente: {docente}" if docente else "",
             f"[Fuente: {fuente}]" if fuente else "",
+            f"Título: {titulo}" if titulo else "",
+            desc,
+        ] if p)
+        if bloque.strip():
+            partes.append(bloque)
+    return "\n\n".join(partes)
+
+
+def _construir_texto_trabajos(entradas: list[dict]) -> str:
+    """Concatena las entradas marcadas como 'trabajos_dirigidos' en un blob de
+    texto para el estructurador de sugerencias de la sección 2 del FO-IN-17."""
+    presupuesto_por_docente = 3500
+    partes: list[str] = []
+    for e in entradas:
+        if e.get("error") or e.get("seccion") != "trabajos_dirigidos":
+            continue
+        titulo = (e.get("proyecto") or "").strip()
+        desc = (e.get("descripcion") or "").strip()[:presupuesto_por_docente]
+        docente = (e.get("docente") or "").strip()
+        bloque = "\n".join(p for p in [
+            f"Docente: {docente}" if docente else "",
             f"Título: {titulo}" if titulo else "",
             desc,
         ] if p)
@@ -412,12 +486,22 @@ def extraer_proyectos(docente: dict | None = None) -> dict:
         logger.info("Extractor: estructurador vacío, usando fallback crudo→limpio")
         proyectos_limpios = _fallback_crudo_a_limpio(todas)
 
+    # 4. Sugerencias de trabajos de grado dirigidos (sección 2 del FO-IN-17),
+    # best-effort: si Gemini falla o no hay nada, lista vacía y el chat
+    # pregunta desde cero (nunca se persisten sin confirmación del docente).
+    texto_trabajos = _construir_texto_trabajos(todas)
+    trabajos_sugeridos = (
+        estructurar_trabajos_grado(texto_trabajos, periodo_actual=periodo, max_filas=6)
+        if texto_trabajos.strip() else []
+    )
+
     fin = datetime.utcnow()
     resultado = {
         "docente": docente,
         "responsable": RESPONSABLE_GRUPAL,
         "periodo": periodo,
         "proyectos": proyectos_limpios,
+        "trabajos_grado_sugeridos": trabajos_sugeridos,
         "_proyectos_crudos": todas,
         "fuentes_consultadas": fuentes_consultadas,
         "errores": errores,

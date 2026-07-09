@@ -152,10 +152,10 @@ class _EncabezadoCanvas(rl_canvas.Canvas):
         h_hdr = 1.8 * cm
         h_elab = 0.6 * cm
         col1 = 3.2 * cm
-        col_mid = 9.0 * cm
         col_right_lbl = 1.6 * cm
         col_right_val = 2.0 * cm
         x0 = 1.5 * cm
+        col_mid = (W - 3.0 * cm) - col1 - col_right_lbl - col_right_val
 
         self.setStrokeColor(_NEGRO)
         self.setLineWidth(0.5)
@@ -388,17 +388,28 @@ def _bloque_linea(num: int, proyecto: dict) -> list:
 
 # ── Sección 2: Participación en Dirección ─────────────────────────────────────
 
-def _seccion_participacion() -> list:
+_NIVELES_TRABAJO = ("Pregrado", "Especialización", "Maestría", "Doctorado")
+
+
+def _seccion_participacion(trabajos: list[dict] | None = None) -> list:
     W = letter[0] - 3.0 * cm
     elementos = []
     elementos.append(_fila_seccion_roja("2. PARTICIPACIÓN EN DIRECCIÓN DE"))
 
+    if trabajos is None:
+        marcas = {n: "[ ]" for n in _NIVELES_TRABAJO}
+        marcas["Pregrado"] = "[X]"
+        marcas["Maestría"] = "[X]"
+    else:
+        niveles_presentes = {t.get("nivel") for t in trabajos}
+        marcas = {n: ("[X]" if n in niveles_presentes else "[ ]") for n in _NIVELES_TRABAJO}
+
     # Sub-encabezado con tipos de grado
     sub_data = [[
         _p("Trabajo de Grado", _BOLD),
-        _p("Pregrado [X]  Especializaciones [ ]", _VALOR),
+        _p(f"Pregrado {marcas['Pregrado']}  Especializaciones {marcas['Especialización']}", _VALOR),
         _p("Tesis", _BOLD),
-        _p("Maestría [X]  Doctorado [ ]", _VALOR),
+        _p(f"Maestría {marcas['Maestría']}  Doctorado {marcas['Doctorado']}", _VALOR),
     ]]
     cw_sub = [2.8 * cm, 5.0 * cm, 1.5 * cm, 3.8 * cm]
     t_sub = Table(sub_data, colWidths=cw_sub)
@@ -416,7 +427,19 @@ def _seccion_participacion() -> list:
         _p("Programa Académico", _HEADER_NEGRO),
         _p("Institución", _HEADER_NEGRO),
     ]
-    filas = [header] + [[_p(""), _p(""), _p(""), _p(""), _p("")] for _ in range(6)]
+    filas_datos = []
+    for t in (trabajos or [])[:6]:
+        filas_datos.append([
+            _p(_v(t.get("titulo"))),
+            _p(_v(t.get("estudiante"))),
+            _p(_v(t.get("director"))),
+            _p(_v(t.get("programa"))),
+            _p(_v(t.get("institucion"))),
+        ])
+    while len(filas_datos) < 6:
+        filas_datos.append([_p(""), _p(""), _p(""), _p(""), _p("")])
+
+    filas = [header] + filas_datos
     t = Table(filas, colWidths=cw, repeatRows=1)
     t.setStyle(TableStyle(list(_BORDE_BASE) + [
         ("BACKGROUND", (0, 0), (-1, 0), _GRIS_CLARO),
@@ -429,7 +452,7 @@ def _seccion_participacion() -> list:
 
 # ── Sección 3: Eventos ────────────────────────────────────────────────────────
 
-def _seccion_eventos() -> list:
+def _seccion_eventos(eventos: list[dict] | None = None) -> list:
     W = letter[0] - 3.0 * cm
     elementos = []
     elementos.append(_fila_seccion_roja("3. ORGANIZACIÓN DE EVENTOS DE INVESTIGACIÓN /CIENTÍFICOS"))
@@ -442,7 +465,19 @@ def _seccion_eventos() -> list:
         _p("Institución Promotora", _HEADER_NEGRO),
         _p("Entidades Participantes", _HEADER_NEGRO),
     ]
-    filas = [header] + [[_p(""), _p(""), _p(""), _p(""), _p("")] for _ in range(4)]
+    filas_datos = []
+    for ev in (eventos or [])[:4]:
+        filas_datos.append([
+            _p(_v(ev.get("nombre"))),
+            _p(_v(ev.get("fecha"))),
+            _p(_v(ev.get("responsable"))),
+            _p(_v(ev.get("institucion_promotora"))),
+            _p(_v(ev.get("entidades_participantes"))),
+        ])
+    while len(filas_datos) < 4:
+        filas_datos.append([_p(""), _p(""), _p(""), _p(""), _p("")])
+
+    filas = [header] + filas_datos
     t = Table(filas, colWidths=cw, repeatRows=1)
     t.setStyle(TableStyle(list(_BORDE_BASE) + [
         ("BACKGROUND", (0, 0), (-1, 0), _GRIS_CLARO),
@@ -455,11 +490,12 @@ def _seccion_eventos() -> list:
 
 # ── Sección 4: Otras Actividades ──────────────────────────────────────────────
 
-def _seccion_otras() -> list:
+def _seccion_otras(fechas: dict | None = None) -> list:
     W = letter[0] - 3.0 * cm
     elementos = []
     elementos.append(_fila_seccion_roja("4. OTRAS ACTIVIDADES DE INVESTIGACIÓN (*)"))
 
+    fechas = fechas or {}
     cw = [W * 0.32, W * 0.24, W * 0.24, W * 0.20]
     header = [
         _p("Nombre", _HEADER_NEGRO),
@@ -468,10 +504,10 @@ def _seccion_otras() -> list:
         _p("Producto", _HEADER_NEGRO),
     ]
     filas_default = [
-        [_p("Coordinación Semillero SIA"), _p(""), _p(""), _p("Informe de Gestión del Semillero SIA")],
-        [_p("Participación en Eventos Académicos"), _p("Miembros GIA"), _p(""), _p("Participación como ponente, charlas, talleres, conferencias, cursos, webinars u otros eventos académicos")],
-        [_p("Actualizaciones"), _p("Miembros GIA"), _p(""), _p("Certificados de Talleres, cursos, webinars, MOOC")],
-        [_p("Reunión mensual de avances GIA"), _p("Miembros GIA"), _p(""), _p("Actas de Reunión del Grupo GIA")],
+        [_p("Coordinación Semillero SIA"), _p("Líder del grupo de investigación"), _p(_v(fechas.get("coordinacion_semillero"))), _p("Informe de Gestión del Semillero SIA")],
+        [_p("Participación en Eventos Académicos"), _p("Miembros GIA"), _p(_v(fechas.get("eventos_academicos"))), _p("Participación como ponente, charlas, talleres, conferencias, cursos, webinars u otros eventos académicos")],
+        [_p("Actualizaciones"), _p("Miembros GIA"), _p(_v(fechas.get("actualizaciones"))), _p("Certificados de Talleres, cursos, webinars, MOOC")],
+        [_p("Reunión mensual de avances GIA"), _p("Miembros GIA"), _p(_v(fechas.get("reunion_mensual"))), _p("Actas de Reunión del Grupo GIA")],
     ]
     filas = [header] + filas_default + [[_p(""), _p(""), _p(""), _p("")] for _ in range(2)]
     t = Table(filas, colWidths=cw, repeatRows=1)
@@ -609,7 +645,7 @@ def generar_pdf_fo_in_17_plantilla(resultado: dict) -> str:
     ))
     story.append(Spacer(1, 0.4 * cm))
 
-    for e in _seccion_participacion():
+    for e in _seccion_participacion(resultado.get("trabajos_grado")):
         story.append(e)
     story.append(Spacer(1, 0.4 * cm))
     story.append(Paragraph(
@@ -619,11 +655,11 @@ def generar_pdf_fo_in_17_plantilla(resultado: dict) -> str:
     ))
     story.append(Spacer(1, 0.4 * cm))
 
-    for e in _seccion_eventos():
+    for e in _seccion_eventos(resultado.get("eventos")):
         story.append(e)
     story.append(Spacer(1, 0.4 * cm))
 
-    for e in _seccion_otras():
+    for e in _seccion_otras(resultado.get("fechas_otras_actividades")):
         story.append(e)
 
     for e in _seccion_firma(docente_info):
