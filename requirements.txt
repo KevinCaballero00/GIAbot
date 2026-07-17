@@ -8,3 +8,4 @@ reportlab
 pypdf
 pydantic
 psycopg2-binary
+bcrypt

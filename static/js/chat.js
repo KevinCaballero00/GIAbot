@@ -22,9 +22,20 @@ closeBtn.addEventListener('click', () => {
   chatWindow.classList.remove('open');
 });
 
-input.addEventListener('keypress', e => {
-  if (e.key === 'Enter') sendMessage();
+// Enter envía; Shift+Enter inserta un salto de línea
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
 });
+
+// Auto-crecimiento vertical del textarea a medida que se escribe
+function autoResize() {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+}
+input.addEventListener('input', autoResize);
 
 sendBtn.addEventListener('click', sendMessage);
 
@@ -60,6 +71,7 @@ async function sendMessage() {
 
   addMessage(text, 'user');
   input.value = '';
+  input.style.height = 'auto';
   showTyping();
 
   try {
