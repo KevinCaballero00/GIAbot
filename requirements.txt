@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+google-genai
+requests
+beautifulsoup4
+reportlab
+pypdf
+pydantic
+psycopg2-binary
+bcrypt

@@ -1,0 +1,522 @@
+"""
+Extractor de proyectos para los informes FO-IN-13 y FO-IN-17.
+
+Extrae información de proyectos del GIA desde:
+  - gia.ufps.edu.co/proyectos/
+  - Perfiles CvLAC de cada docente listado en /team/
+
+Normaliza los datos a JSON con campos: fuente, docente, proyecto,
+periodo, descripcion, enlace_origen, fecha_extraccion.
+Guarda el resultado en static/extracciones/ y retorna la ruta.
+
+Fallos por fuente son aislados: si un CvLAC no responde, ese docente
+queda marcado con error y el proceso continúa con las demás fuentes.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import unicodedata
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+from datetime import datetime
+from pathlib import Path
+
+from bs4 import BeautifulSoup
+
+from services.scraper import (
+    BASE_URL,
+    _fetch,
+    _limpiar_dom,
+    _extraer_docentes_bruto,
+)
+from services.estructurador import estructurar_proyectos, estructurar_trabajos_grado
+
+logger = logging.getLogger(__name__)
+
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "static" / "extracciones"
+
+RESPONSABLE_GRUPAL = "GIA"
+
+KW_PROYECTOS = {
+    "proyectos de investigación",
+    "proyectos de investigacion",
+    "proyectos de extensión",
+    "proyectos de extension",
+    "proyectos de formación",
+    "proyectos de formacion",
+    "proyecto de investigación",
+    "proyecto de investigacion",
+    "proyectos en curso",
+    "proyectos vigentes",
+    "proyecto:",
+}
+
+PERIODO_RE = re.compile(r"\b(20\d{2}[-–/]\d{1,2}|20\d{2})\b")
+MAX_LINEAS_SECCION = 100
+
+KW_TRABAJOS = {
+    "trabajos dirigidos",
+    "trabajos de grado de pregrado",
+    "trabajos de grado de especialización",
+    "trabajos de grado de especializacion",
+    "trabajos de grado de maestría",
+    "trabajos de grado de maestria",
+    "trabajos de grado dirigidos",
+    "tesis de doctorado",
+    "tesis de maestría",
+    "tesis de maestria",
+    "tutorías",
+    "tutorias",
+    "dirección de trabajos de grado",
+    "direccion de trabajos de grado",
+}
+
+
+def _capturar_secciones(lineas: list[str], keywords: set[str]) -> list[list[str]]:
+    """Agrupa líneas consecutivas en secciones que comienzan con alguna de las
+    `keywords` dadas. Corta una sección tras 3 líneas vacías seguidas (una sola
+    línea vacía puede separar campos dentro de la misma entrada en CvLAC)."""
+    secciones: list[list[str]] = []
+    buf: list[str] = []
+    capturando = False
+    consecutivos_vacios = 0
+
+    for linea in lineas:
+        ll = linea.lower().strip()
+        es_inicio = any(kw in ll for kw in keywords)
+
+        if es_inicio:
+            if buf:
+                secciones.append(buf)
+            buf = [linea]
+            capturando = True
+            consecutivos_vacios = 0
+        elif capturando:
+            if not ll:
+                consecutivos_vacios += 1
+                if consecutivos_vacios >= 3 and len(buf) > 2:
+                    secciones.append(buf)
+                    buf = []
+                    capturando = False
+                    consecutivos_vacios = 0
+                else:
+                    buf.append(linea)
+            else:
+                consecutivos_vacios = 0
+                buf.append(linea)
+                if len(buf) >= MAX_LINEAS_SECCION:
+                    secciones.append(buf)
+                    buf = []
+                    capturando = False
+
+    if buf:
+        secciones.append(buf)
+
+    return secciones
+
+
+# ─────────────────────────── extractor CvLAC ─────────────────────────────────
+
+def _extraer_proyectos_cvlac(nombre_docente: str, cvlac_url: str) -> list[dict]:
+    """Extrae secciones de proyectos (y trabajos de grado dirigidos) del perfil
+    CvLAC de un docente. Ambas secciones se capturan sobre el mismo HTML ya
+    descargado, sin una segunda petición."""
+    fecha = datetime.utcnow().isoformat()
+    html = _fetch(cvlac_url, timeout=20)
+
+    if not html:
+        return [{
+            "fuente": "CvLAC (Minciencias)",
+            "docente": nombre_docente,
+            "proyecto": None,
+            "periodo": None,
+            "descripcion": None,
+            "enlace_origen": cvlac_url,
+            "fecha_extraccion": fecha,
+            "error": "No se pudo obtener el perfil CvLAC",
+        }]
+
+    soup = BeautifulSoup(html, "html.parser")
+    _limpiar_dom(soup)
+    texto = soup.get_text("\n", strip=True)
+    texto = re.sub(r"\n{3,}", "\n\n", texto)
+    lineas = texto.split("\n")
+
+    secciones = _capturar_secciones(lineas, KW_PROYECTOS)
+
+    resultado: list[dict] = []
+    if not secciones:
+        resultado.append({
+            "fuente": "CvLAC (Minciencias)",
+            "docente": nombre_docente,
+            "proyecto": None,
+            "periodo": None,
+            "descripcion": "No se encontraron secciones de proyectos en el perfil",
+            "enlace_origen": cvlac_url,
+            "fecha_extraccion": fecha,
+        })
+    else:
+        for sec in secciones:
+            texto_sec = "\n".join(sec).strip()
+            titulo = sec[0].strip()
+
+            periodo = None
+            for linea in sec:
+                m = PERIODO_RE.search(linea)
+                if m:
+                    periodo = m.group(0)
+                    break
+
+            resultado.append({
+                "fuente": "CvLAC (Minciencias)",
+                "docente": nombre_docente,
+                "proyecto": titulo,
+                "periodo": periodo,
+                "descripcion": texto_sec[:2500],
+                "enlace_origen": cvlac_url,
+                "fecha_extraccion": fecha,
+            })
+
+    # Trabajos de grado dirigidos: mismo HTML, distintas palabras clave. Se
+    # marcan con "seccion" para excluirlas de _construir_texto_crudo (no deben
+    # contaminar la estructuración de proyectos) y alimentar por separado a
+    # estructurar_trabajos_grado().
+    secciones_trabajos = _capturar_secciones(lineas, KW_TRABAJOS)
+    for sec in secciones_trabajos:
+        texto_sec = "\n".join(sec).strip()
+        titulo = sec[0].strip()
+
+        periodo = None
+        for linea in sec:
+            m = PERIODO_RE.search(linea)
+            if m:
+                periodo = m.group(0)
+                break
+
+        resultado.append({
+            "fuente": "CvLAC (Minciencias)",
+            "docente": nombre_docente,
+            "proyecto": titulo,
+            "periodo": periodo,
+            "descripcion": texto_sec[:2500],
+            "enlace_origen": cvlac_url,
+            "fecha_extraccion": fecha,
+            "seccion": "trabajos_dirigidos",
+        })
+
+    return resultado
+
+
+# ─────────────────────── extractor página GIA /proyectos/ ────────────────────
+
+def _extraer_proyectos_gia() -> list[dict]:
+    """Extrae proyectos listados en gia.ufps.edu.co/proyectos/."""
+    url = f"{BASE_URL}/proyectos/"
+    fecha = datetime.utcnow().isoformat()
+    html = _fetch(url, timeout=20)
+
+    if not html:
+        return [{
+            "fuente": "GIA Web – /proyectos/",
+            "docente": None,
+            "proyecto": None,
+            "periodo": None,
+            "descripcion": None,
+            "enlace_origen": url,
+            "fecha_extraccion": fecha,
+            "error": "No se pudo obtener la página de proyectos",
+        }]
+
+    soup = BeautifulSoup(html, "html.parser")
+    _limpiar_dom(soup)
+    proyectos: list[dict] = []
+
+    # Intento estructurado: cards / articles con título
+    for card in soup.select("article, .proyecto, .project, .card, .entry, section"):
+        titulo_el = card.find(["h1", "h2", "h3", "h4"])
+        if not titulo_el:
+            continue
+        titulo = titulo_el.get_text(" ", strip=True)
+        if not titulo or len(titulo) < 5:
+            continue
+
+        desc = " ".join(p.get_text(" ", strip=True) for p in card.find_all("p"))
+        periodo = None
+        m = PERIODO_RE.search(card.get_text(" ", strip=True))
+        if m:
+            periodo = m.group(0)
+
+        proyectos.append({
+            "fuente": "GIA Web – /proyectos/",
+            "docente": None,
+            "proyecto": titulo,
+            "periodo": periodo,
+            "descripcion": desc[:800] if desc else None,
+            "enlace_origen": url,
+            "fecha_extraccion": fecha,
+        })
+
+    if not proyectos:
+        # Fallback: encabezados h2/h3/h4 con el párrafo siguiente
+        for h in soup.find_all(["h2", "h3", "h4"]):
+            titulo = h.get_text(" ", strip=True)
+            if not titulo or len(titulo) < 8:
+                continue
+            siguiente = h.find_next_sibling(["p", "div"])
+            desc = siguiente.get_text(" ", strip=True) if siguiente else None
+            proyectos.append({
+                "fuente": "GIA Web – /proyectos/",
+                "docente": None,
+                "proyecto": titulo,
+                "periodo": None,
+                "descripcion": desc[:600] if desc else None,
+                "enlace_origen": url,
+                "fecha_extraccion": fecha,
+            })
+
+    if not proyectos:
+        # Último recurso: texto plano de la página completa
+        texto = soup.get_text("\n", strip=True)
+        proyectos.append({
+            "fuente": "GIA Web – /proyectos/",
+            "docente": None,
+            "proyecto": None,
+            "periodo": None,
+            "descripcion": texto[:2000],
+            "enlace_origen": url,
+            "fecha_extraccion": fecha,
+            "nota": "Sin estructura detectada; se incluye texto plano de la página",
+        })
+
+    return proyectos
+
+
+# ─────────────────────── obtener docentes con CvLAC ──────────────────────────
+
+def _obtener_docentes_cvlac() -> list[tuple[str, str]]:
+    """Devuelve lista de (nombre_docente, cvlac_url) desde /team/."""
+    url = f"{BASE_URL}/team/"
+    html = _fetch(url, timeout=20)
+    if not html:
+        logger.warning("Extractor: no se pudo obtener /team/ para listar CvLAC")
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    _limpiar_dom(soup)
+    docentes = _extraer_docentes_bruto(soup)
+
+    resultado: list[tuple[str, str]] = []
+    for d in docentes:
+        for enlace in d.get("enlaces", []):
+            if enlace["tipo"] == "CvLAC (Minciencias)":
+                resultado.append((d["nombre"], enlace["url"]))
+                break
+
+    return resultado
+
+
+# ──────────────────────────── utilidades de período ──────────────────────────
+
+def calcular_periodo() -> tuple[str, int, int]:
+    """Calcula el período académico actual. Retorna (periodo_str, semestre, anio)."""
+    hoy = datetime.now()
+    semestre = 1 if 2 <= hoy.month <= 7 else 2
+    return f"{hoy.year}-{semestre}", semestre, hoy.year
+
+
+def _normalizar_nombre(nombre: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", nombre.lower())
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _construir_texto_crudo(entradas: list[dict]) -> str:
+    """Concatena título + descripción de las entradas crudas en un solo blob de texto
+    para alimentar al estructurador LLM. Cada bloque indica el docente de origen para
+    que el estructurador pueda atribuir cada proyecto correctamente."""
+    presupuesto_por_docente = 3500
+    partes: list[str] = []
+    for e in entradas:
+        if e.get("error") or e.get("seccion") == "trabajos_dirigidos":
+            continue
+        titulo = (e.get("proyecto") or "").strip()
+        desc = (e.get("descripcion") or "").strip()[:presupuesto_por_docente]
+        fuente = (e.get("fuente") or "").strip()
+        docente = (e.get("docente") or "").strip()
+        bloque = "\n".join(p for p in [
+            f"Docente: {docente}" if docente else "",
+            f"[Fuente: {fuente}]" if fuente else "",
+            f"Título: {titulo}" if titulo else "",
+            desc,
+        ] if p)
+        if bloque.strip():
+            partes.append(bloque)
+    return "\n\n".join(partes)
+
+
+def _construir_texto_trabajos(entradas: list[dict]) -> str:
+    """Concatena las entradas marcadas como 'trabajos_dirigidos' en un blob de
+    texto para el estructurador de sugerencias de la sección 2 del FO-IN-17."""
+    presupuesto_por_docente = 3500
+    partes: list[str] = []
+    for e in entradas:
+        if e.get("error") or e.get("seccion") != "trabajos_dirigidos":
+            continue
+        titulo = (e.get("proyecto") or "").strip()
+        desc = (e.get("descripcion") or "").strip()[:presupuesto_por_docente]
+        docente = (e.get("docente") or "").strip()
+        bloque = "\n".join(p for p in [
+            f"Docente: {docente}" if docente else "",
+            f"Título: {titulo}" if titulo else "",
+            desc,
+        ] if p)
+        if bloque.strip():
+            partes.append(bloque)
+    return "\n\n".join(partes)
+
+
+def _fallback_crudo_a_limpio(entradas: list[dict], max_lineas: int = 6) -> list[dict]:
+    """Si el estructurador LLM no devuelve nada, mapea las entradas crudas al esquema
+    limpio de forma mínima para no dejar el PDF vacío. Ordena por año detectado
+    descendente antes de recortar a `max_lineas`."""
+    candidatas = [e for e in entradas if not e.get("error") and e.get("proyecto")]
+
+    def _anio(e: dict) -> int:
+        m = PERIODO_RE.search(e.get("periodo") or "")
+        if not m:
+            return 0
+        return int(re.search(r"20\d{2}", m.group(0)).group(0))
+
+    candidatas.sort(key=_anio, reverse=True)
+
+    limpios: list[dict] = []
+    for e in candidatas:
+        titulo = (e.get("proyecto") or "").strip()
+        limpios.append({
+            "linea": "Sistemas Inteligentes Aplicados",
+            "proyecto": titulo[:200] + ("..." if len(titulo) > 200 else ""),
+            "objetivo": (e.get("descripcion") or "")[:180],
+            "actividades": [],
+            "responsable": e.get("docente") or "",
+            "producto": "",
+            "periodo": e.get("periodo") or "",
+        })
+        if len(limpios) >= max_lineas:
+            break
+    return limpios
+
+
+# ────────────────────────────── orquestador ──────────────────────────────────
+
+def extraer_proyectos(docente: dict | None = None) -> dict:
+    """
+    Extrae proyectos de todas las fuentes (todos los docentes del /team/), los
+    estructura con Gemini en modo grupal y retorna el dict.
+
+    `docente` es el docente autenticado que dispara la extracción (se persiste en
+    BD como `generado_por`, no filtra ni limita las fuentes consultadas).
+
+    El dict retornado incluye:
+      - docente: datos del docente autenticado (o None)
+      - responsable: "GIA" (el plan de acción es del grupo, no de una persona)
+      - periodo: período académico calculado (ej. "2026-1")
+      - proyectos: lista de líneas de investigación ya estructuradas (máx. 6)
+      - fuentes_consultadas / errores / fecha_extraccion / duracion_segundos
+      - _proyectos_crudos: entradas crudas de respaldo (no se persiste en BD)
+      - _ruta_archivo / _nombre_archivo: ruta del JSON generado
+    """
+    logger.info("Extractor: iniciando extracción grupal de proyectos...")
+    inicio = datetime.utcnow()
+    todas: list[dict] = []
+    errores: list[str] = []
+    fuentes_consultadas: list[str] = []
+
+    periodo, _, _ = calcular_periodo()
+
+    # 1. Página institucional /proyectos/
+    fuentes_consultadas.append("GIA Web – /proyectos/")
+    try:
+        entradas_gia = _extraer_proyectos_gia()
+        todas.extend(entradas_gia)
+        logger.info("Extractor: %d entradas desde GIA /proyectos/", len(entradas_gia))
+    except Exception as exc:
+        msg = f"GIA Web /proyectos/: {exc}"
+        logger.warning("Extractor: fallo – %s", msg)
+        errores.append(msg)
+
+    # 2. Perfiles CvLAC de todos los docentes del /team/
+    docentes_cvlac = _obtener_docentes_cvlac()
+    logger.info("Extractor: %d docentes con CvLAC a consultar", len(docentes_cvlac))
+
+    if docentes_cvlac:
+        for nombre_doc, _ in docentes_cvlac:
+            fuentes_consultadas.append(f"CvLAC de {nombre_doc}")
+
+        with ThreadPoolExecutor(max_workers=min(len(docentes_cvlac), 6)) as ex:
+            futuros = {
+                ex.submit(_extraer_proyectos_cvlac, nombre, url): nombre
+                for nombre, url in docentes_cvlac
+            }
+            try:
+                for futuro in as_completed(futuros, timeout=120):
+                    nombre = futuros[futuro]
+                    try:
+                        entradas = futuro.result()
+                        todas.extend(entradas)
+                        logger.info(
+                            "Extractor: %d entradas desde CvLAC de %s",
+                            len(entradas), nombre,
+                        )
+                    except Exception as exc:
+                        msg = f"CvLAC de {nombre}: {exc}"
+                        logger.warning("Extractor: fallo – %s", msg)
+                        errores.append(msg)
+            except TimeoutError:
+                pendientes = [futuros[f] for f in futuros if not f.done()]
+                msg = f"Timeout esperando CvLAC de: {', '.join(pendientes)}"
+                logger.warning("Extractor: %s", msg)
+                errores.append(msg)
+
+    # 3. Estructurar el texto crudo a líneas limpias (máx. 6) con Gemini
+    texto_crudo = _construir_texto_crudo(todas)
+    proyectos_limpios = estructurar_proyectos(
+        texto_crudo, periodo_actual=periodo, max_lineas=6,
+    )
+    if not proyectos_limpios:
+        logger.info("Extractor: estructurador vacío, usando fallback crudo→limpio")
+        proyectos_limpios = _fallback_crudo_a_limpio(todas)
+
+    # 4. Sugerencias de trabajos de grado dirigidos (sección 2 del FO-IN-17),
+    # best-effort: si Gemini falla o no hay nada, lista vacía y el chat
+    # pregunta desde cero (nunca se persisten sin confirmación del docente).
+    texto_trabajos = _construir_texto_trabajos(todas)
+    trabajos_sugeridos = (
+        estructurar_trabajos_grado(texto_trabajos, periodo_actual=periodo, max_filas=6)
+        if texto_trabajos.strip() else []
+    )
+
+    fin = datetime.utcnow()
+    resultado = {
+        "docente": docente,
+        "responsable": RESPONSABLE_GRUPAL,
+        "periodo": periodo,
+        "proyectos": proyectos_limpios,
+        "trabajos_grado_sugeridos": trabajos_sugeridos,
+        "_proyectos_crudos": todas,
+        "fuentes_consultadas": fuentes_consultadas,
+        "errores": errores,
+        "fecha_extraccion": inicio.isoformat(),
+        "duracion_segundos": round((fin - inicio).total_seconds(), 2),
+    }
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    ts = inicio.strftime("%Y%m%d_%H%M%S")
+    usuario_slug = docente["usuario"] if docente else "todos"
+    nombre_archivo = f"proyectos_{usuario_slug}_{ts}.json"
+    ruta = OUTPUT_DIR / nombre_archivo
+    ruta.write_text(json.dumps(resultado, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("Extractor: resultado guardado en %s", ruta)
+
+    resultado["_ruta_archivo"] = str(ruta)
+    resultado["_nombre_archivo"] = nombre_archivo
+    return resultado

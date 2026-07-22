@@ -1,0 +1,30 @@
+# Secretos y entornos locales
+.env
+.venv
+
+# Control de versiones
+.git
+.gitignore
+
+# Cache de Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Dependencias de Node (marked se carga desde CDN)
+node_modules
+package.json
+package-lock.json
+
+# Cache de contexto web (se regenera al iniciar)
+cache/
+
+# Artefactos generados localmente (se persisten en volúmenes)
+static/extracciones/*.json
+static/generados/*.pdf
+
+# IDE y editores
+.vscode
+.idea
+*.swp

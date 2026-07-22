@@ -8,6 +8,9 @@ const messages = document.getElementById('chat-messages');
 let history = [];
 let isOpen = false;
 
+// ID único por sesión de navegador
+const SESSION_ID = crypto.randomUUID();
+
 toggle.addEventListener('click', () => {
   isOpen = !isOpen;
   chatWindow.classList.toggle('open', isOpen);
@@ -19,9 +22,20 @@ closeBtn.addEventListener('click', () => {
   chatWindow.classList.remove('open');
 });
 
-input.addEventListener('keypress', e => {
-  if (e.key === 'Enter') sendMessage();
+// Enter envía; Shift+Enter inserta un salto de línea
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
 });
+
+// Auto-crecimiento vertical del textarea a medida que se escribe
+function autoResize() {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+}
+input.addEventListener('input', autoResize);
 
 sendBtn.addEventListener('click', sendMessage);
 
@@ -57,13 +71,14 @@ async function sendMessage() {
 
   addMessage(text, 'user');
   input.value = '';
+  input.style.height = 'auto';
   showTyping();
 
   try {
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, history })
+      body: JSON.stringify({ message: text, history, session_id: SESSION_ID })
     });
     const data = await res.json();
     hideTyping();
