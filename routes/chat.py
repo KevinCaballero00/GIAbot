@@ -7,15 +7,26 @@ Maneja en orden de prioridad:
   3. Confirmación del FO-IN-17 fuente antes de generar el FO-IN-13.
   4. Flujo de % de cumplimiento del FO-IN-13 en curso.
   5. Flujo de recolección conversacional de las secciones 2/3/4 del FO-IN-17 en curso.
-  6. Flujo de completado de PDF en curso.
-  7. Detección de "actualizar plan de acción" (ANTES de detectar_pdf_solicitado:
+     Al arrancar, primero se pregunta el modo (paso a paso vs. subir un documento);
+     ver "elegir_modo" en `_bloque_fo_in_17` / `_procesar_fase_elegir_modo`.
+  6. Flujo del selector de informe existente vs. generar uno nuevo en curso.
+  7. Flujo de subida de documento para las secciones 2/3/4 en curso
+     (`esperando_documento_fo17` espera el archivo vía `POST /chat/documento`;
+     `confirmando_documento_fo17` espera la confirmación sí/no del resumen extraído).
+  8. Flujo de completado de PDF en curso.
+  9. Detección de "actualizar plan de acción" (ANTES de detectar_pdf_solicitado:
      "plan de acción" ya es alias del 17 y entregaría el cacheado sin re-preguntar).
-  8. Detección de solicitud de PDFs (FO-IN-13 / FO-IN-17).
-  9. Detección de intención de registrar proyecto.
-  10. Detección de intención de completar PDF.
-  11. Chat normal delegado al LLM.
+  10. Detección de solicitud de PDFs (FO-IN-13 / FO-IN-17): si el docente ya está
+     autenticado y pide un único documento con reportes previos, se muestra el
+     selector existente/nuevo en vez de generar directo (ver
+     `_entregar_pdfs_o_selector`). Si pide "ambos" documentos a la vez, se
+     mantiene el comportamiento directo (sin selector).
+  11. Detección de intención de registrar proyecto.
+  12. Detección de intención de completar PDF.
+  13. Chat normal delegado al LLM.
 
-Todas las interacciones quedan registradas en conversation_logs.
+Todas las interacciones quedan registradas en conversation_logs (incluida la
+subida de documento, con intención "documento_fo_in_17").
 """
 from __future__ import annotations
 
@@ -27,17 +38,20 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from models.message import Message
 from services.ai_service import generar_respuesta
 from services.auth_service import verificar_credenciales
 from services.complete_pdf import pdf_completer
+from services.estructurador import estructurar_secciones_desde_texto
 from services.extractor_proyectos import RESPONSABLE_GRUPAL, calcular_periodo
 from services.fo_in_13_service import generar_fo_in_13, obtener_fuente_fo_in_13
 from services.fo_in_17_service import actualizar_datos_recolectados, generar_fo_in_17
+from services.lector_documento import extraer_texto
 from services.pdf_fo_in_13 import proyectos_validos
+from services.validadores_fo_in_17 import parse_fecha as _parse_fecha, parse_nivel as _parse_nivel
 
 
 logger = logging.getLogger(__name__)
@@ -264,75 +278,8 @@ def _parse_porcentaje(mensaje: str) -> str | None:
     return f"{valor}%"
 
 
-def _quitar_tildes(s: str) -> str:
-    import unicodedata
-    nfkd = unicodedata.normalize("NFKD", s)
-    return "".join(c for c in nfkd if not unicodedata.combining(c))
-
-
 def _es_terminar(msg_lower: str) -> bool:
     return any(p in msg_lower for p in _PALABRAS_TERMINAR)
-
-
-def _parse_nivel(texto: str) -> str | None:
-    """Normaliza el nivel de un trabajo de grado a uno de los 4 valores oficiales."""
-    t = _quitar_tildes((texto or "").strip().lower())
-    mapa = {
-        "pregrado": "Pregrado",
-        "especializacion": "Especialización",
-        "especializaciones": "Especialización",
-        "maestria": "Maestría",
-        "doctorado": "Doctorado",
-    }
-    for k, v in mapa.items():
-        if k in t:
-            return v
-    return None
-
-
-_MESES_ES = {
-    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
-    "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
-    "noviembre": 11, "diciembre": 12,
-}
-
-
-def _parse_fecha(texto: str) -> str | None:
-    """
-    Normaliza una fecha a DD/MM/AAAA. Acepta DD/MM/AAAA, DD-MM-AAAA, AAAA-MM-DD
-    y "DD de <mes> de AAAA". Retorna None si no reconoce ningún formato de fecha
-    (el llamador decide si reintentar o aceptar el texto literal).
-    """
-    t = (texto or "").strip()
-
-    m = re.match(r"^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$", t)
-    if m:
-        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        try:
-            return datetime(y, mo, d).strftime("%d/%m/%Y")
-        except ValueError:
-            return None
-
-    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", t)
-    if m:
-        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        try:
-            return datetime(y, mo, d).strftime("%d/%m/%Y")
-        except ValueError:
-            return None
-
-    m = re.match(r"^(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})$", _quitar_tildes(t.lower()))
-    if m:
-        d = int(m.group(1))
-        mo = _MESES_ES.get(m.group(2))
-        y = int(m.group(3))
-        if mo:
-            try:
-                return datetime(y, mo, d).strftime("%d/%m/%Y")
-            except ValueError:
-                return None
-
-    return None
 
 
 def detectar_intencion_completar(mensaje: str) -> int | None:
@@ -449,7 +396,7 @@ async def _bloque_fo_in_17(
         "autenticado": True,
         "docente": docente,
         "fo17_semestre": semestre_actual,
-        "fo17_fase": "trabajos",
+        "fo17_fase": "elegir_modo",
         "fo17_subfase": "inicio",
         "fo17_trabajos": [],
         "fo17_eventos": [],
@@ -463,21 +410,11 @@ async def _bloque_fo_in_17(
 
     bloque = (
         "📄 **FO-IN-17 – Plan de Acción de Grupos de Investigación**\n"
-        "Antes de entregarte el PDF necesito completar la sección "
-        "**2. Participación en Dirección de** (trabajos de grado dirigidos).\n\n"
-    )
-    if sugerencias:
-        lineas_sug = "\n".join(
-            f"{i}. {s.get('titulo') or '(sin título)'} — {s.get('estudiante') or '(sin estudiante)'}"
-            for i, s in enumerate(sugerencias, 1)
-        )
-        bloque += (
-            "Encontré estas sugerencias en el CvLAC (confírmalas escribiendo su número, "
-            "o dime el título de un trabajo distinto):\n\n" + lineas_sug + "\n\n"
-        )
-    bloque += (
-        "¿Cuál es el **título** del primer trabajo de grado dirigido? "
-        "_(escribe **ninguno** o **listo** si no hay ninguno)_"
+        "Antes de entregarte el PDF necesito completar las secciones "
+        "**2, 3 y 4** (trabajos de grado, eventos y otras actividades).\n\n"
+        "Para eso, ¿prefieres…\n\n"
+        "1. Digitar la información paso a paso\n"
+        "2. Subir un documento (.txt, .docx o .pdf) con la información"
     )
     return bloque, fuentes, True
 
@@ -626,6 +563,117 @@ async def iniciar_entrega_pdfs(
             else "Aquí tienes el documento solicitado:"
         )
     return (intro + "\n\n" + "\n\n".join(partes)).strip(), fuentes
+
+
+# ── Selector de informe existente vs. generar uno nuevo ─────────────────────
+
+_NOMBRES_DOC = {"13": "FO-IN-13", "17": "FO-IN-17"}
+
+
+def _construir_lista_reportes(
+    tipo: str, session_id: str, docente: dict | None, reportes: list[dict],
+) -> str:
+    """
+    Arma el mensaje numerado con los reportes ya generados de `tipo` más la
+    opción de generar uno nuevo. Guarda la lista en la sesión y fija
+    paso="seleccionando_reporte" para que el próximo mensaje se despache a
+    `_procesar_seleccion_reporte`.
+    """
+    estado = sesiones_activas.setdefault(session_id, {})
+    estado.update({
+        "paso": "seleccionando_reporte",
+        "autenticado": True,
+        "docente": docente,
+        "sel_reportes": reportes,
+        "sel_tipo": tipo,
+    })
+
+    nombre_doc = _NOMBRES_DOC.get(tipo, tipo)
+    lineas = [f"¿Qué {nombre_doc} deseas?", ""]
+    for i, r in enumerate(reportes, 1):
+        fecha = _formatear_fecha_display(r.get("fecha_generacion"))
+        lineas.append(f"{i}. {nombre_doc} — creado el {fecha} · semestre {r.get('semestre')}")
+    lineas.append(f"{len(reportes) + 1}. ➕ Generar uno nuevo")
+    return "\n".join(lineas)
+
+
+async def _entregar_pdfs_o_selector(
+    session_id: str,
+    pdfs: list[int],
+    docente: dict | None,
+    forzar_recoleccion_17: bool = False,
+) -> tuple[str, list[str]]:
+    """
+    Punto de entrada común para entregar PDFs a un docente autenticado.
+
+    Si se solicita un único tipo y ya existen reportes previos de ese tipo,
+    muestra el selector (existente/nuevo) en vez de generar directo. Alcance
+    MVP: si se piden ambos documentos a la vez se mantiene el comportamiento
+    directo actual (no hay selector para "ambos").
+    """
+    from services.rag_service import listar_reportes
+
+    if len(pdfs) == 1 and not forzar_recoleccion_17:
+        tipo = str(pdfs[0])
+        reportes = listar_reportes(tipo)
+        if reportes:
+            return _construir_lista_reportes(tipo, session_id, docente, reportes), []
+
+    return await iniciar_entrega_pdfs(
+        session_id, pdfs, docente, forzar_recoleccion_17=forzar_recoleccion_17,
+    )
+
+
+async def _procesar_seleccion_reporte(session_id: str, mensaje: str) -> str:
+    """
+    Procesa la respuesta del docente al selector de informe existente/nuevo.
+
+    Número de un reporte existente → re-entrega el enlace (verificando que el
+    archivo siga existiendo en disco). Opción "generar uno nuevo" (último
+    número de la lista, o las palabras "nuevo"/"otro") → continúa con el flujo
+    normal de generación. Entrada no reconocida → repite la lista.
+    """
+    estado = sesiones_activas[session_id]
+    reportes: list[dict] = estado.get("sel_reportes", [])
+    tipo = estado.get("sel_tipo")
+    docente = estado.get("docente")
+    msg = mensaje.strip().lower()
+    opcion_nuevo = len(reportes) + 1
+
+    def _limpiar_seleccion() -> None:
+        estado["paso"] = "autenticado"
+        estado.pop("sel_reportes", None)
+        estado.pop("sel_tipo", None)
+
+    pide_nuevo = msg == str(opcion_nuevo) or any(p in msg for p in ("nuevo", "otro", "generar"))
+
+    if msg.isdigit() and not pide_nuevo and 1 <= int(msg) <= len(reportes):
+        reporte = reportes[int(msg) - 1]
+        nombre_disco = Path(reporte["pdf_path"]).name
+        ruta = GENERADOS_DIR / nombre_disco
+        _limpiar_seleccion()
+        if not ruta.exists():
+            return (
+                "⚠️ Ese archivo ya no está disponible. Vuelve a pedir el documento "
+                "para generar uno nuevo."
+            )
+        nombre_doc = _NOMBRES_DOC.get(tipo, tipo)
+        fecha = _formatear_fecha_display(reporte.get("fecha_generacion"))
+        return (
+            f"📄 **{nombre_doc}**\n"
+            f"Semestre: {reporte.get('semestre')} · Generado el {fecha}\n"
+            f"👉 [Descargar informe (PDF)](/descargar/{tipo}/{nombre_disco})"
+        )
+
+    if pide_nuevo:
+        _limpiar_seleccion()
+        respuesta, _ = await iniciar_entrega_pdfs(session_id, [int(tipo)], docente)
+        return respuesta
+
+    return (
+        "No reconocí esa opción. Responde con el número de un informe de la lista "
+        f"o **{opcion_nuevo}** para generar uno nuevo."
+    )
 
 
 async def _continuar_generacion_fo_in_13(
@@ -822,6 +870,64 @@ def _pasar_a_fase_fechas_otras(estado: dict) -> str:
     return (
         "Por último, la sección **4. Otras Actividades de Investigación**.\n\n"
         + primera["pregunta"] + "\n_(escribe **omitir** para dejarla vacía)_"
+    )
+
+
+# ── Elección de modo: paso a paso vs. subir documento ───────────────────────
+
+def _es_modo_documento(msg_lower: str) -> bool:
+    return msg_lower.strip() == "2" or any(
+        p in msg_lower for p in ("documento", "subir", "cargar archivo", "adjuntar")
+    )
+
+
+def _es_modo_paso_a_paso(msg_lower: str) -> bool:
+    return msg_lower.strip() == "1" or any(
+        p in msg_lower for p in ("paso a paso", "digitar", "manual")
+    )
+
+
+def _texto_inicio_fase_trabajos(sugerencias: list[dict]) -> str:
+    bloque = (
+        "Empecemos con la sección **2. Participación en Dirección de** "
+        "(trabajos de grado dirigidos).\n\n"
+    )
+    if sugerencias:
+        lineas_sug = "\n".join(
+            f"{i}. {s.get('titulo') or '(sin título)'} — {s.get('estudiante') or '(sin estudiante)'}"
+            for i, s in enumerate(sugerencias, 1)
+        )
+        bloque += (
+            "Encontré estas sugerencias en el CvLAC (confírmalas escribiendo su número, "
+            "o dime el título de un trabajo distinto):\n\n" + lineas_sug + "\n\n"
+        )
+    bloque += (
+        "¿Cuál es el **título** del primer trabajo de grado dirigido? "
+        "_(escribe **ninguno** o **listo** si no hay ninguno)_"
+    )
+    return bloque
+
+
+async def _procesar_fase_elegir_modo(session_id: str, mensaje: str) -> str:
+    estado = sesiones_activas[session_id]
+    msg_lower = mensaje.strip().lower()
+
+    if _es_modo_documento(msg_lower):
+        estado["paso"] = "esperando_documento_fo17"
+        return (
+            "📎 Adjunta un archivo **.txt, .docx o .pdf** con la información de trabajos de "
+            "grado, eventos y otras actividades (usa el botón de adjuntar debajo del chat).\n\n"
+            "_Si prefieres hacerlo paso a paso, escribe **paso a paso**._"
+        )
+
+    if _es_modo_paso_a_paso(msg_lower):
+        estado["fo17_fase"] = "trabajos"
+        estado["fo17_subfase"] = "inicio"
+        return _texto_inicio_fase_trabajos(estado.get("fo17_sugerencias") or [])
+
+    return (
+        "No reconocí tu elección. Responde **1** para digitar la información paso a paso, "
+        "o **2** para subir un documento."
     )
 
 
@@ -1036,6 +1142,8 @@ async def _procesar_recoleccion_fo_in_17(session_id: str, mensaje: str) -> str:
         return await _finalizar_recoleccion_fo_in_17(session_id)
 
     fase = estado.get("fo17_fase")
+    if fase == "elegir_modo":
+        return await _procesar_fase_elegir_modo(session_id, mensaje)
     if fase == "trabajos":
         return await _procesar_fase_trabajos(session_id, mensaje)
     if fase == "eventos":
@@ -1045,6 +1153,67 @@ async def _procesar_recoleccion_fo_in_17(session_id: str, mensaje: str) -> str:
 
     estado["paso"] = "autenticado"
     return "❌ Ocurrió un error en la recolección. Por favor vuelve a solicitar el plan de acción."
+
+
+# ── Flujo de subida de documento para las secciones 2/3/4 del FO-IN-17 ──────
+
+async def _procesar_esperando_documento(session_id: str, mensaje: str) -> str:
+    """
+    Mensaje de texto recibido mientras se espera el archivo adjunto: recuerda
+    cómo adjuntarlo, u ofrece volver al flujo paso a paso si el docente lo pide.
+    """
+    estado = sesiones_activas[session_id]
+    msg_lower = mensaje.strip().lower()
+
+    if _es_modo_paso_a_paso(msg_lower):
+        estado["paso"] = "recolectando_fo_in_17"
+        estado["fo17_fase"] = "trabajos"
+        estado["fo17_subfase"] = "inicio"
+        return _texto_inicio_fase_trabajos(estado.get("fo17_sugerencias") or [])
+
+    return (
+        "Aún no he recibido ningún archivo. Usa el botón 📎 para adjuntar un "
+        "**.txt, .docx o .pdf**, o escribe **paso a paso** para digitar la información "
+        "directamente en el chat."
+    )
+
+
+async def _procesar_confirmacion_documento(session_id: str, mensaje: str) -> str:
+    """
+    Procesa la confirmación (sí/no) del resumen extraído del documento subido.
+    Afirmación → fusiona lo detectado y regenera el PDF (reutiliza
+    `_finalizar_recoleccion_fo_in_17`). Negación → descarta y vuelve a
+    preguntar el modo.
+    """
+    estado = sesiones_activas[session_id]
+
+    if _es_negacion(mensaje) and not _es_afirmacion(mensaje):
+        estado.pop("doc_parsed", None)
+        estado["paso"] = "recolectando_fo_in_17"
+        estado["fo17_fase"] = "elegir_modo"
+        return (
+            "❌ Descarté la información del documento.\n\n"
+            "Para completar las secciones 2, 3 y 4, ¿prefieres…\n\n"
+            "1. Digitar la información paso a paso\n"
+            "2. Subir otro documento (.txt, .docx o .pdf)"
+        )
+
+    if _es_afirmacion(mensaje):
+        doc_parsed = estado.pop("doc_parsed", {})
+        docente = estado.get("docente")
+        nombre_docente = (docente.get("nombre") if docente else "") or ""
+
+        trabajos = doc_parsed.get("trabajos_grado", [])
+        for trabajo in trabajos:
+            if not trabajo.get("director"):
+                trabajo["director"] = nombre_docente
+
+        estado["fo17_trabajos"] = trabajos
+        estado["fo17_eventos"] = doc_parsed.get("eventos", [])
+        estado["fo17_fechas_otras"] = doc_parsed.get("fechas_otras_actividades", {})
+        return await _finalizar_recoleccion_fo_in_17(session_id)
+
+    return "Por favor responde **sí** para usar esta información o **no** para descartarla."
 
 
 def _guardar_reporte_asinc(docente, tipo, semestre, pdf_nombre, fuentes, responsable_nombre=None):
@@ -1166,6 +1335,124 @@ async def descargar(tipo: str, filename: str):
     )
 
 
+# ── Subida de documento para las secciones 2/3/4 del FO-IN-17 ────────────────
+
+_EXTENSIONES_DOCUMENTO_PERMITIDAS = {"txt", "docx", "pdf"}
+
+
+@router.post("/chat/documento")
+async def subir_documento(
+    session_id: str = Form(...),
+    archivo: UploadFile = File(...),
+):
+    """
+    Recibe el archivo (.txt/.docx/.pdf) que el docente sube para llenar las
+    secciones 2/3/4 del FO-IN-17 sin digitarlas paso a paso (paso de sesión
+    "esperando_documento_fo17"). Extrae el texto, lo estructura con Gemini y
+    deja un resumen para confirmación (paso "confirmando_documento_fo17").
+
+    Endpoint separado y multipart (no JSON) porque el contrato de `/chat` no
+    admite archivos; el contrato de respuesta es el mismo (`{"reply": str}`)
+    para que el frontend reutilice el mismo renderizado de mensajes del bot.
+    """
+    t_inicio = time.monotonic()
+    estado = sesiones_activas.get(session_id)
+    respuesta = ""
+    exito = True
+    nombre_archivo = archivo.filename or ""
+
+    try:
+        if not estado or estado.get("paso") != "esperando_documento_fo17":
+            exito = False
+            respuesta = (
+                "⚠️ No estoy esperando ningún archivo en este momento. Pide de nuevo el "
+                "Plan de Acción (FO-IN-17) y elige la opción de subir un documento."
+            )
+            return {"reply": respuesta}
+
+        extension = nombre_archivo.rsplit(".", 1)[-1].lower() if "." in nombre_archivo else ""
+        if extension not in _EXTENSIONES_DOCUMENTO_PERMITIDAS:
+            exito = False
+            respuesta = (
+                f"⚠️ Extensión '.{extension}' no soportada. Sube un archivo .txt, .docx o .pdf, "
+                "o escribe **paso a paso** para digitar la información."
+            )
+            return {"reply": respuesta}
+
+        contenido = await archivo.read()
+        try:
+            texto = extraer_texto(nombre_archivo, contenido)
+        except ValueError as exc:
+            exito = False
+            respuesta = f"⚠️ {exc}"
+            return {"reply": respuesta}
+
+        periodo_actual = estado.get("fo17_semestre") or calcular_periodo()[0]
+        datos = await asyncio.to_thread(estructurar_secciones_desde_texto, texto, periodo_actual)
+
+        trabajos = datos.get("trabajos_grado", [])
+        eventos = datos.get("eventos", [])
+        fechas_otras = datos.get("fechas_otras_actividades", {})
+        n_fechas = sum(1 for v in fechas_otras.values() if v)
+
+        if not trabajos and not eventos and not n_fechas:
+            respuesta = (
+                f"No pude extraer información reconocible de **{nombre_archivo}** (¿trabajos "
+                "de grado, eventos o fechas de otras actividades?).\n\n"
+                "Puedes intentar con otro archivo, o escribe **paso a paso** para digitar la "
+                "información directamente en el chat."
+            )
+            return {"reply": respuesta}
+
+        estado["doc_parsed"] = datos
+        estado["paso"] = "confirmando_documento_fo17"
+
+        lineas = [
+            f"📄 Encontré en **{nombre_archivo}**:",
+            f"- **{len(trabajos)}** trabajo(s) de grado dirigido(s)",
+            f"- **{len(eventos)}** evento(s)",
+            f"- **{n_fechas}** fecha(s) de otras actividades",
+        ]
+        if trabajos:
+            lineas.append("\n**Trabajos de grado:**")
+            lineas.extend(
+                f"- {t.get('titulo') or '(sin título)'} — {t.get('estudiante') or '(sin estudiante)'}"
+                for t in trabajos
+            )
+        if eventos:
+            lineas.append("\n**Eventos:**")
+            lineas.extend(
+                f"- {ev.get('nombre') or '(sin nombre)'} ({ev.get('fecha') or 'sin fecha'})"
+                for ev in eventos
+            )
+        lineas.append("\n¿Confirmas que use esta información para completar el Plan de Acción? (**sí**/**no**)")
+        respuesta = "\n".join(lineas)
+        return {"reply": respuesta}
+
+    except Exception as exc:
+        logger.error("Error en /chat/documento session=%s: %s", session_id, exc)
+        exito = False
+        respuesta = "❌ Ocurrió un error inesperado al procesar el archivo. Intenta de nuevo."
+        return {"reply": respuesta}
+
+    finally:
+        tiempo_ms = round((time.monotonic() - t_inicio) * 1000)
+        docente_id = estado["docente"].get("id") if estado and estado.get("docente") else None
+        try:
+            from services.log_service import registrar_log
+            registrar_log(
+                session_id=session_id,
+                mensaje_usuario=f"[documento subido: {nombre_archivo}]",
+                respuesta_bot=respuesta,
+                intencion_detectada="documento_fo_in_17",
+                tiempo_respuesta_ms=tiempo_ms,
+                exito=exito,
+                docente_id=docente_id,
+            )
+        except Exception as exc_log:
+            logger.debug("No se pudo registrar log de /chat/documento: %s", exc_log)
+
+
 # ── Endpoint principal de chat ────────────────────────────────────────────────
 
 @router.post("/chat")
@@ -1217,7 +1504,7 @@ async def chat(data: Message):
 
                 pdfs = estado.get("pdfs_solicitados", [])
                 forzar_17 = estado.get("forzar_recoleccion_17", False)
-                respuesta_docs, fuentes_log = await iniciar_entrega_pdfs(
+                respuesta_docs, fuentes_log = await _entregar_pdfs_o_selector(
                     session_id, pdfs, docente, forzar_recoleccion_17=forzar_17,
                 )
                 intencion = f"solicitud_pdf_{pdfs}"
@@ -1254,6 +1541,24 @@ async def chat(data: Message):
         if estado and estado.get("paso") == "recolectando_fo_in_17":
             intencion = "solicitud_pdf_[17]"
             respuesta = await _procesar_recoleccion_fo_in_17(session_id, mensaje)
+            return {"reply": respuesta}
+
+        # ── 2e. Selector de informe existente vs. nuevo en curso ────────────
+        if estado and estado.get("paso") == "seleccionando_reporte":
+            intencion = "seleccion_reporte"
+            respuesta = await _procesar_seleccion_reporte(session_id, mensaje)
+            return {"reply": respuesta}
+
+        # ── 2f. Esperando el archivo adjunto para secciones 2/3/4 del FO-IN-17 ─
+        if estado and estado.get("paso") == "esperando_documento_fo17":
+            intencion = "documento_fo_in_17"
+            respuesta = await _procesar_esperando_documento(session_id, mensaje)
+            return {"reply": respuesta}
+
+        # ── 2g. Confirmación del resumen extraído del documento subido ──────
+        if estado and estado.get("paso") == "confirmando_documento_fo17":
+            intencion = "documento_fo_in_17"
+            respuesta = await _procesar_confirmacion_documento(session_id, mensaje)
             return {"reply": respuesta}
 
         # ── 3. Flujo de completado de PDF en curso ──────────────────────────
@@ -1315,7 +1620,7 @@ async def chat(data: Message):
         if pdfs_solicitados:
             intencion = f"solicitud_pdf_{pdfs_solicitados}"
             if autenticado:
-                respuesta, fuentes_log = await iniciar_entrega_pdfs(
+                respuesta, fuentes_log = await _entregar_pdfs_o_selector(
                     session_id, pdfs_solicitados, estado["docente"]
                 )
             else:

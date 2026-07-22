@@ -205,6 +205,52 @@ def buscar_contexto_relevante(query: str, top_k: int = 5) -> str:
     )
 
 
+# ── Consulta de reportes generados ───────────────────────────────────────────
+
+def listar_reportes(tipo: str, limite: int = 8) -> list[dict]:
+    """
+    Lista los reportes ya generados de `tipo` ("13" o "17"), del más reciente
+    al más antiguo, deduplicados por `pdf_path` (una misma regeneración puede
+    quedar registrada varias veces en `reportes_generados`).
+
+    Retorna dicts con: id, tipo, semestre, pdf_path, fecha_generacion,
+    responsable_nombre. Lista vacía si no hay reportes o si la consulta falla.
+    """
+    try:
+        conn = get_connection()
+        cur = get_cursor(conn)
+        try:
+            cur.execute(
+                """
+                SELECT id, tipo, semestre, pdf_path, fecha_generacion, responsable_nombre
+                FROM reportes_generados
+                WHERE tipo = %s AND pdf_path IS NOT NULL
+                ORDER BY fecha_generacion DESC, id DESC
+                """,
+                (tipo,),
+            )
+            filas = cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as exc:
+        logger.warning("RAG: error al listar reportes (tipo=%s): %s", tipo, exc)
+        return []
+
+    vistos: set[str] = set()
+    reportes: list[dict] = []
+    for fila in filas:
+        pdf_path = fila["pdf_path"]
+        if not pdf_path or pdf_path in vistos:
+            continue
+        vistos.add(pdf_path)
+        reportes.append(dict(fila))
+        if len(reportes) >= limite:
+            break
+
+    return reportes
+
+
 # ── Registro de reportes generados ───────────────────────────────────────────
 
 def guardar_reporte(

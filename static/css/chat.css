@@ -217,7 +217,7 @@ footer ul li a:hover { color: var(--acento); }
   outline: none; transition: border-color 0.2s;
   resize: none; line-height: 1.4;
   white-space: pre-wrap; overflow-wrap: break-word; word-break: break-word;
-  max-height: 120px; overflow-y: auto;
+  max-height: 120px; overflow-y: hidden;
 }
 #chat-input:focus { border-color: var(--rojo-claro); }
 #chat-send {
@@ -226,3 +226,9 @@ footer ul li a:hover { color: var(--acento); }
   font-size: 16px; color: white; transition: background 0.2s;
 }
 #chat-send:hover { background: var(--rojo-claro); }
+#chat-attach {
+  width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0;
+  background: transparent; border: 1.5px solid #dde3ea; cursor: pointer;
+  font-size: 16px; color: var(--rojo-medio); transition: background 0.2s, border-color 0.2s;
+}
+#chat-attach:hover { background: #fbeaea; border-color: var(--rojo-claro); }
